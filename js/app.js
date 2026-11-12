@@ -309,6 +309,7 @@ function homeScreen() {
       <li>When everyone's in, answers are revealed. You score <b>1 point for each other player</b> who wrote the same thing.</li>
       <li>The host can merge answers that mean the same thing (“NYC” and “New York”), so feel free to argue your case.</li>
       <li><b>Spotlight rounds:</b> try to match one chosen player. Matching them is worth 2 points, and they get 1 for each person who matched.</li>
+      <li><b>Likes:</b> at the reveal, ♥ your favorite answer or drawing (one per round). The most liked gets +1.</li>
       <li><b>Custom prompts:</b> anyone in the lobby can add their own. They stay secret until they come up.</li>
       <li><b>Sketch rounds:</b> draw your answer and add a hidden label. Everyone sees the drawings first, then the labels are revealed and scored.</li>
       <li><b>Quick pick:</b> tap one of four options. Pick what you think most people will pick.</li>
@@ -435,7 +436,7 @@ function recapCard(v) {
           const p = player(m.id);
           const art = h.mode === 'sketch' ? `<canvas class="art art-thumb" data-art="r${h.round}:${esc(m.id)}"></canvas>` : '';
           const variant = m.text && m.text.trim().toLowerCase() !== g.label.trim().toLowerCase() ? ` <em>“${esc(m.text)}”</em>` : '';
-          return `<span class="mem ${art ? 'mem-art' : ''}">${art}<span>${p ? chip(p) : esc(name(m.id))}${variant}${m.pts ? ` <b class="pts">+${m.pts}</b>` : ''}</span></span>`;
+          return `<span class="mem ${art ? 'mem-art' : ''}">${art}<span>${p ? chip(p) : esc(name(m.id))}${variant}${m.pts ? ` <b class="pts">+${m.pts}</b>` : ''}${m.likes ? ` <span class="like own">♥ ${m.likes}</span>` : ''}</span></span>`;
         }).join('')}</div>
       </li>`).join('');
     const open = ui.recapOpen.has(h.round);
@@ -555,11 +556,25 @@ function answerScreen(v) {
   </section>`;
 }
 
+// ♥ button for someone else's answer (or a like count on your own).
+function likeBtn(v, pid, anon) {
+  if (!v.canLike) return '';
+  const likes = v.likes || {};
+  const n = likes[pid] || 0;
+  const best = n > 0 && n === Math.max(0, ...Object.values(likes));
+  if (pid === myId) return n ? `<span class="like own ${best ? 'best' : ''}" title="Likes on your answer">♥ ${n}</span>` : '';
+  const on = v.myLike === pid;
+  const who = anon ? 'this drawing' : `${esc(pname(pid))}’s answer`;
+  return `<button class="like ${on ? 'on' : ''} ${best ? 'best' : ''}" data-like="${esc(pid)}" aria-pressed="${on}" aria-label="Like ${who}">♥${n ? ` ${n}` : ''}</button>`;
+}
+
+const LIKE_HINT = '♥ Like your favorite answer. The most liked gets +1.';
+
 function galleryScreen(v) {
-  const tiles = v.gallery.map((id) => `<li><canvas class="art" data-art="${esc(id)}"></canvas></li>`).join('');
+  const tiles = v.gallery.map((id) => `<li><canvas class="art" data-art="${esc(id)}"></canvas>${likeBtn(v, id, true)}</li>`).join('');
   return `
   ${roundHeader(v)}
-  <p class="hint">Who drew what? Have a look, then the host shows the answers.</p>
+  <p class="hint">Who drew what? Have a look${v.canLike ? ' and ♥ your favorite drawing (most liked gets +1)' : ''}, then the host shows the answers.</p>
   <ul class="gallery">${tiles || '<li class="muted">Nobody drew anything this round.</li>'}</ul>
   ${isHost() ? '<button id="b-unveil" class="primary wide">Show answers</button>' : '<p class="muted center small">Waiting for the host to show the answers…</p>'}`;
 }
@@ -582,7 +597,7 @@ function revealScreen(v) {
         if (!p) return '';
         const pts = v.points[m.id] || 0;
         const art = v.mode === 'sketch' ? `<canvas class="art art-thumb" data-art="${esc(m.id)}"></canvas>` : '';
-        return `<span class="mem ${art ? 'mem-art' : ''}" ${canMerge && n > 1 ? `data-split="${esc(m.id)}"` : ''}>${art}<span>${chip(p)}${m.text.trim().toLowerCase() !== g.label.trim().toLowerCase() ? `<em>“${esc(m.text)}”</em>` : ''}${pts ? `<b class="pts">+${pts}</b>` : ''}</span></span>`;
+        return `<span class="mem ${art ? 'mem-art' : ''}" ${canMerge && n > 1 ? `data-split="${esc(m.id)}"` : ''}>${art}<span>${chip(p)}${m.text.trim().toLowerCase() !== g.label.trim().toLowerCase() ? `<em>“${esc(m.text)}”</em>` : ''}${pts ? `<b class="pts">+${pts}</b>` : ''}</span>${likeBtn(v, m.id)}</span>`;
       }).join('') : '<span class="muted small">Nobody</span>'}</div>
     </li>`;
   }).join('');
@@ -591,6 +606,7 @@ function revealScreen(v) {
   let hint = '';
   if (canMerge) hint = ui.selected ? 'Now tap another answer to merge them.' : 'Tap two answers to merge them if they mean the same thing. Tap a name to split it out.';
   else if (v.mode === 'rather' && v.type !== 'spotlight') hint = 'The majority side scores 2 each. A tie means nobody scores.';
+  if (v.canLike) hint = hint ? `${hint}<br>${LIKE_HINT}` : LIKE_HINT;
   return `
   ${roundHeader(v)}
   ${hint ? `<p class="hint">${hint}</p>` : ''}
@@ -896,6 +912,7 @@ document.addEventListener('click', async (e) => {
   if (id === 'b-end') { if (confirm('End the game now and show final scores?')) act({ t: 'end' }); return; }
   if (id === 'b-again') return act({ t: 'again' });
   if (id === 'b-unveil') return act({ t: 'unveil' });
+  if (t.dataset.like) { e.stopPropagation(); return act({ t: 'like', id: t.dataset.like }); }
 
   // Quick pick / would you rather: tapping an option is the answer.
   if (t.dataset.opt != null && S.view?.phase === 'answer' && S.view.options) {

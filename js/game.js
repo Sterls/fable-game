@@ -28,6 +28,7 @@ export function newGame(code, hostId, hostName) {
     gallery: [],
     history: [], // one entry per finished round, for the end-of-game recap
     prompts: {}, // pid -> custom prompts that player added in the lobby
+    likes: {}, // voter pid -> liked pid, for the current round (one like each)
     promptBy: null, // pid who wrote the current prompt, if custom
     historyArt: {}, // round -> { pid: drawing }
     type: 'crowd',
@@ -89,6 +90,8 @@ function rekey(s, from, to) {
   s.gallery = (s.gallery || []).map((m) => (m === from ? to : m));
   move(s.points);
   move(s.prompts);
+  move(s.likes);
+  for (const [voter, target] of Object.entries(s.likes || {})) if (target === from) s.likes[voter] = to;
   if (s.promptBy === from) s.promptBy = to;
   move(s.stats);
   for (const g of s.groups) g.members = g.members.map((m) => (m === from ? to : m));
@@ -199,6 +202,7 @@ function startRound(s) {
   s.art = {};
   s.gallery = [];
   s.unveiled = true;
+  s.likes = {};
   s.answers = {};
   s.groups = [];
   s.points = {};
@@ -280,6 +284,10 @@ export function score(s) {
       for (const id of g.members) pts[id] = g.members.length - 1;
     }
   }
+  // Most-liked answer: +1 (ties all get it).
+  const likes = likeCounts(s);
+  const top = Math.max(0, ...Object.values(likes));
+  if (top > 0) for (const [id, n] of Object.entries(likes)) if (n === top && id in pts) pts[id] += 1;
   s.points = pts;
   s.groups.sort((a, b) => b.members.length - a.members.length || a.label.localeCompare(b.label));
 }
@@ -296,7 +304,7 @@ function bank(s) {
     spotlight: s.spotlight,
     groups: s.groups.map((g) => ({
       label: g.label,
-      members: g.members.map((id) => ({ id, text: s.answers[id], pts: s.points[id] || 0 })),
+      members: g.members.map((id) => ({ id, text: s.answers[id], pts: s.points[id] || 0, likes: likeCounts(s)[id] || 0 })),
     })),
   });
   if (s.mode === 'sketch') (s.historyArt ||= {})[s.round] = { ...s.art };
@@ -344,6 +352,7 @@ function resetToLobby(s) {
   s.unveiled = true;
   s.history = [];
   s.historyArt = {};
+  s.likes = {};
   s.sync = {};
   s.answers = {};
   s.groups = [];
@@ -397,6 +406,16 @@ export function reduce(s, from, a) {
       if (s.phase === 'lobby') s.players = s.players.filter((p) => p.id !== from);
       else me.connected = false;
       return maybeAutoReveal(s) || true;
+    case 'like': {
+      if (s.phase !== 'reveal' || !me || !canLike(s)) return false;
+      const target = String(a.id || '');
+      if (target === from || !s.answers[target] || !s.players.some((p) => p.id === target)) return false;
+      s.likes ||= {};
+      if (s.likes[from] === target) delete s.likes[from];
+      else s.likes[from] = target;
+      score(s);
+      return true;
+    }
     case 'prompts':
       if (s.phase !== 'lobby' || !me) return false;
       (s.prompts ||= {})[from] = cleanPrompts(a.text);
@@ -435,6 +454,10 @@ export function reduce(s, from, a) {
       if (a.id === s.hostId) return false;
       s.players = s.players.filter((p) => p.id !== a.id);
       if (s.prompts) delete s.prompts[a.id];
+      if (s.likes) {
+        delete s.likes[a.id];
+        for (const [voter, target] of Object.entries(s.likes)) if (target === a.id) delete s.likes[voter];
+      }
       delete s.answers[a.id];
       if (s.phase === 'reveal') {
         for (const g of s.groups) g.members = g.members.filter((m) => m !== a.id);
@@ -526,6 +549,22 @@ export function setConnected(s, id, on) {
   return true;
 }
 
+// Likes only make sense where answers differ from person to person.
+export function canLike(s) {
+  return s.mode === 'words' || s.mode === 'sketch' || !s.mode;
+}
+
+// Likes per answer (player id), counting only valid votes from players still in the room.
+export function likeCounts(s) {
+  const out = {};
+  const here = new Set(s.players.map((p) => p.id));
+  for (const [voter, target] of Object.entries(s.likes || {})) {
+    if (!here.has(voter) || !here.has(target) || voter === target || !s.answers[target]) continue;
+    out[target] = (out[target] || 0) + 1;
+  }
+  return out;
+}
+
 // All drawings for the current sketch round, once they may be seen (after the reveal).
 export function artFor(s) {
   if (s.mode !== 'sketch' || s.phase !== 'reveal') return null;
@@ -573,11 +612,17 @@ export function viewFor(s, pid) {
     v.gallery = s.gallery;
     v.noAnswer = [];
     v.points = {};
+    v.likes = likeCounts(s);
+    v.myLike = (s.likes || {})[pid] || null;
+    v.canLike = canLike(s);
   } else if (s.phase === 'reveal') {
     v.unveiled = true;
     v.groups = s.groups.map((g) => ({ id: g.id, label: g.label, members: g.members.map((m) => ({ id: m, text: s.answers[m] })) }));
     v.points = s.points;
     v.noAnswer = s.players.filter((p) => !s.answers[p.id]).map((p) => p.id);
+    v.likes = likeCounts(s);
+    v.myLike = (s.likes || {})[pid] || null;
+    v.canLike = canLike(s);
   }
   if (s.phase === 'final') {
     let best = null;

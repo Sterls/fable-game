@@ -19,7 +19,8 @@ A calm party game for a group of friends. Everyone answers the same prompt in se
    - **Sketch:** draw your answer and add a short hidden label. The reveal opens on an anonymous gallery, then the host shows who drew what; scoring uses the labels.
    - **Quick pick:** tap one of four options.
    - **Would you rather 🌶️:** a spicy (not explicit) two-way dilemma. Everyone on the majority side scores 2; a tie scores nothing.
-7. At the end you see the winner and the **most in-sync pair**.
+7. **Likes:** at the reveal of word and sketch rounds, everyone can ♥ one favorite answer (tap again to take it back, or tap another to move it). You can't like your own. The most-liked answer gets **+1**; ties all get it. In sketch rounds you can like drawings in the anonymous gallery, before anyone knows who drew them.
+8. At the end you see the winner, the **most in-sync pair**, and a round-by-round recap.
 
 The host can choose 5, 8 or 12 rounds and set an optional 45 or 90 second timer. **Everyone** in the lobby can add custom prompts (inside jokes work well, up to 20 each). They stay secret until they come up, are played first in word rounds with credit ("Prompt from Ben"), and unused ones carry over to the next game.
 
