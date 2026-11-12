@@ -14,7 +14,12 @@ A calm party game for a group of friends. Everyone answers the same prompt in se
 3. When everyone is in, or the host taps **Reveal now**, matching answers are grouped and scored. Grouping ignores capitalization, punctuation, "a/the", and plurals.
 4. The host can **merge** two answers that mean the same thing ("NYC" and "New York") by tapping both. Tapping a name **splits** that answer back out.
 5. **Spotlight rounds** (every 3rd round, with 3+ players): try to match one chosen player. Matching them is worth 2 points, and they get 1 for each person who matched.
-6. At the end you see the winner and the **most in-sync pair**.
+6. **Round types** mix through the game (the host can turn each on or off in the lobby):
+   - **Words:** type an answer (the classic round).
+   - **Sketch:** draw your answer and add a short hidden label. The reveal opens on an anonymous gallery, then the host shows who drew what; scoring uses the labels.
+   - **Quick pick:** tap one of four options.
+   - **Would you rather 🌶️:** a spicy (not explicit) two-way dilemma. Everyone on the majority side scores 2; a tie scores nothing.
+7. At the end you see the winner and the **most in-sync pair**.
 
 The host can choose 5, 8 or 12 rounds, set an optional 45 or 90 second timer, and add custom prompts (inside jokes work well). Custom prompts are played first.
 
@@ -84,7 +89,8 @@ A **crew** is a friend group with a permanent, shared leaderboard. The host link
 | `js/game.js` | Game rules: rounds, scoring, merging, and what each player can see |
 | `js/net.js` | Transport: Supabase Realtime, plus BroadcastChannel for `?local=1` testing |
 | `js/app.js` | UI and session handling |
-| `js/prompts.js` | Built-in prompts (~160) |
+| `js/prompts.js` | Built-in prompts: ~160 word prompts, 42 sketch prompts, 40 quick picks, 40 would-you-rathers |
+| `js/sketch.js` | Drawing pad and compact stroke encoding |
 | `js/crew.js`, `js/config.js` | Supabase client and project settings |
 | `js/board.js` | Crew leaderboard screen |
 | `supabase/schema.sql` | Database tables and functions (paste into the Supabase SQL editor) |

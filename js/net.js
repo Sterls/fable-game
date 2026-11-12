@@ -5,7 +5,7 @@
 //   Local    - BroadcastChannel (same browser, multiple tabs; for testing: add ?local=1)
 //
 // Host API:   createHost(code, { onOpen, onMessage(connId, msg), onLeave(connId), onError })
-//             -> { send(connId, msg), close() }
+//             -> { send(connId, msg), broadcast(msg), close() }
 // Client API: createClient(code, { onOpen, onMessage(msg), onClose, onError })
 //             -> { send(msg), close() }
 import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
@@ -75,6 +75,7 @@ function rtHost(code, h) {
 
   return {
     send(id, msg) { if (!closed) out({ to: id, type: 'msg', msg }); },
+    broadcast(msg) { if (!closed) out({ to: '*', type: 'msg', msg }); },
     close() { closed = true; sb().removeChannel(ch); },
   };
 }
@@ -86,6 +87,14 @@ function rtClient(code, h) {
   let closed = false;
   let hello = null;
   let helloTimer = null;
+  let subscribed = false;
+  // Say hello once connected, and repeat only while the host hasn't answered.
+  const sayHello = () => {
+    if (!hello || !subscribed || closed) return;
+    out('hello', hello);
+    clearInterval(helloTimer);
+    if (!opened) helloTimer = setInterval(() => (opened ? clearInterval(helloTimer) : out('hello', hello)), 3000);
+  };
   const out = (type, msg) => ch.send({ type: 'broadcast', event: 'c2h', payload: { from: me, type, msg } });
   const giveUp = setTimeout(() => {
     if (!opened && !closed) h.onError && h.onError({ type: 'no-room', message: `Couldn’t find room ${code}. Check the code, and make sure the host still has the game open.` });
@@ -93,7 +102,8 @@ function rtClient(code, h) {
 
   ch.on('broadcast', { event: 'h2c' }, ({ payload }) => {
     if (closed || !payload) return;
-    if (payload.type === 'host-up') { if (hello) out('hello', hello); return; }
+    if (payload.type === 'host-up') { sayHello(); return; }
+    if (payload.to === '*' && payload.type === 'msg') { if (opened) h.onMessage(payload.msg); return; }
     if (payload.to !== me) return;
     if (payload.type === 'welcome') {
       if (!opened) { opened = true; clearTimeout(giveUp); clearInterval(helloTimer); h.onOpen && h.onOpen(); }
@@ -108,8 +118,9 @@ function rtClient(code, h) {
   ch.subscribe((status) => {
     if (closed) return;
     if (status === 'SUBSCRIBED') {
+      subscribed = true;
       ch.track({ role: 'player' });
-      if (hello) out('hello', hello);
+      sayHello();
     } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
       if (opened) h.onClose && h.onClose();
     }
@@ -121,8 +132,7 @@ function rtClient(code, h) {
       if (closed) return;
       if (!hello && msg && msg.t === 'hello') {
         hello = msg;
-        out('hello', hello);
-        helloTimer = setInterval(() => !opened && out('hello', hello), 2500);
+        sayHello();
         return;
       }
       out('msg', msg);
@@ -159,6 +169,7 @@ function localHost(code, h) {
   setTimeout(() => h.onOpen && h.onOpen(), 0);
   return {
     send(id, msg) { ch.postMessage({ to: id, type: 'msg', msg }); },
+    broadcast(msg) { for (const id of seen.keys()) ch.postMessage({ to: id, type: 'msg', msg }); },
     close() { ch.close(); },
   };
 }

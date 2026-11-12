@@ -1,5 +1,6 @@
 import { createHost, createClient, useLocal } from './net.js';
-import { newGame, reduce, viewFor, tick, setConnected, cleanName, results, MAX_PLAYERS } from './game.js';
+import { newGame, reduce, viewFor, tick, setConnected, cleanName, results, artFor, MAX_PLAYERS } from './game.js';
+import { PALETTE, encode, attachPad, paint, paintAll } from './sketch.js';
 import { crewEnabled, createCrew, checkCrew, submitGame, getLeaderboard, cleanSlug } from './crew.js';
 import { boardScreen } from './board.js';
 
@@ -28,7 +29,16 @@ const ui = {
   draft: '', editing: false, selected: null, deadlineAt: 0, showHelp: false, showCustom: false,
   crewForm: null, crewBusy: false, crewErr: '',
   board: null, // { slug, data, loading, err, sort, open }
+  pad: { strokes: [], color: 0, width: 0 }, // my drawing for the current sketch round
+  art: null, // { round, art: { pid: data } } received from the host after a sketch reveal
 };
+
+function getArt(pid) {
+  if (pid === myId && ui.pad.strokes.length && S.view && S.view.phase === 'answer') return encode(ui.pad.strokes);
+  if (S.role === 'host' && S.state) return S.state.art[pid] || '';
+  if (ui.art && S.view && ui.art.round === S.view.round) return ui.art.art[pid] || '';
+  return '';
+}
 
 const ALPHA = 'BCDFGHJKLMNPQRSTVWXZ';
 function newCode() {
@@ -42,6 +52,9 @@ function hostRoom(name, resume) {
   if (resume) {
     for (const p of state.players) p.connected = p.id === myId;
     if (state.save === 'saving') state.save = 'error';
+    state.settings.modes ||= { words: true, sketch: true, pick: true, rather: true }; // rooms saved by older versions
+    state.art ||= {};
+    state.gallery ||= [];
   } else {
     const crew = store.get('crew');
     if (crewEnabled() && crew && crew.slug) state.crew = { slug: crew.slug, name: crew.name };
@@ -62,7 +75,10 @@ function hostRoom(name, resume) {
           for (const [c, p] of S.conns) if (p === r.replaced) { S.net.send(c, { t: 'replaced' }); S.conns.delete(c); }
         }
         S.conns.set(connId, pid);
-        return sync();
+        sync();
+        const art = artFor(S.state);
+        if (art) S.net.send(connId, { t: 'art', ...art });
+        return;
       }
       const pid = S.conns.get(connId);
       if (!pid) return;
@@ -87,6 +103,13 @@ function sync() {
   const s = S.state;
   s.updated = Date.now();
   store.set('host', s);
+  // Drawings go out once per sketch round, to everyone at the same time.
+  const art = artFor(s);
+  const artKey = art && `${s.gameId}:${s.round}`;
+  if (art && S.artSent !== artKey) {
+    S.artSent = artKey;
+    if (S.net.broadcast) S.net.broadcast({ t: 'art', ...art });
+  }
   for (const [connId, pid] of S.conns) S.net.send(connId, { t: 'view', v: viewFor(s, pid) });
   receive(viewFor(s, myId));
   if (s.phase === 'final' && s.crew && !s.save) saveResults();
@@ -132,6 +155,7 @@ function joinRoom(code, name, isRetry) {
   const since = isRetry ? S.lostAt || Date.now() : Date.now();
   S.lostAt = since;
   render();
+  let askedTakeover = false;
   const net = createClient(code, {
     onOpen() {
       S.status = 'ok';
@@ -141,10 +165,13 @@ function joinRoom(code, name, isRetry) {
     },
     onMessage(msg) {
       if (msg.t === 'view') receive(msg.v);
+      else if (msg.t === 'art') { ui.art = { round: msg.round, art: msg.art || {} }; render(); }
       else if (msg.t === 'full') leave(`That room is full (${MAX_PLAYERS} players max).`);
       else if (msg.t === 'kicked') leave('The host removed you from the room.');
       else if (msg.t === 'replaced') leave('You rejoined this room from another device or browser.');
       else if (msg.t === 'taken') {
+        if (askedTakeover) return; // a repeated hello can trigger a second reply; ask only once
+        askedTakeover = true;
         const yes = confirm(`Someone named ${msg.name} is already in this room.\n\nIs that you on another device or browser? Choose OK to continue as ${msg.name} (your score comes with you), or Cancel to pick a different name.`);
         if (yes) net.send({ t: 'hello', id: myId, name, takeover: true });
         else leave(`Someone named ${msg.name} is already in this room. Pick a different name.`);
@@ -187,7 +214,11 @@ function receive(v) {
   const prev = S.view;
   if (!prev || prev.round !== v.round || prev.phase !== v.phase) {
     ui.selected = null;
-    if (v.phase === 'answer' && (!prev || prev.round !== v.round)) { ui.draft = v.mine || ''; ui.editing = !v.mine; }
+    if (v.phase === 'answer' && (!prev || prev.round !== v.round)) {
+      ui.draft = v.mine || '';
+      ui.editing = !v.mine;
+      ui.pad = { strokes: [], color: ui.pad.color, width: ui.pad.width };
+    }
   }
   ui.deadlineAt = v.remaining ? Date.now() + v.remaining : 0;
   S.view = v;
@@ -265,6 +296,9 @@ function homeScreen() {
       <li>When everyone's in, answers are revealed. You score <b>1 point for each other player</b> who wrote the same thing.</li>
       <li>The host can merge answers that mean the same thing (“NYC” and “New York”), so feel free to argue your case.</li>
       <li><b>Spotlight rounds:</b> try to match one chosen player. Matching them is worth 2 points, and they get 1 for each person who matched.</li>
+      <li><b>Sketch rounds:</b> draw your answer and add a hidden label. Everyone sees the drawings first, then the labels are revealed and scored.</li>
+      <li><b>Quick pick:</b> tap one of four options. Pick what you think most people will pick.</li>
+      <li><b>Would you rather:</b> a spicy dilemma. Everyone on the majority side scores 2.</li>
     </ol>` : ''}
   </section>`;
 }
@@ -292,6 +326,14 @@ function lobbyScreen(v) {
     <h2>Settings</h2>
     <div class="setting"><span>Rounds</span>${seg('rounds', [5, 8, 12], v.settings.rounds, (o) => o)}</div>
     <div class="setting"><span>Timer</span>${seg('timer', [0, 45, 90], v.settings.timer, (o) => (o ? o + 's' : 'Off'))}</div>
+    <div class="setting setting-col"><span>Round types</span>
+      <div class="chips" role="group" aria-label="Round types">
+        ${[['words', 'Words'], ['sketch', 'Sketch'], ['pick', 'Quick pick'], ['rather', 'Would you rather 🌶️']].map(([k, label]) => {
+          const on = (v.settings.modes || {})[k];
+          return `<button class="tchip ${on ? 'on' : ''}" data-mode="${k}" aria-pressed="${!!on}" ${host ? '' : 'disabled'}>${label}</button>`;
+        }).join('')}
+      </div>
+    </div>
     ${host ? `
       <button class="link" id="b-custom">${ui.showCustom ? 'Hide' : 'Add'} your own prompts ${v.settings.customCount ? `(${v.settings.customCount})` : ''}</button>
       ${ui.showCustom ? `<textarea id="custom" data-keep rows="5" placeholder="One per line, e.g.&#10;A place we've all been together&#10;Something Jamie always says"></textarea>
@@ -357,11 +399,19 @@ function myStatsCard(v) {
   return `<section class="card"><h2>Your game</h2>${lines.map((l) => `<p class="tight">${l}</p>`).join('')}</section>`;
 }
 
+const MODE_INFO = {
+  words: { label: '', how: '' },
+  sketch: { label: 'Sketch round', how: 'Draw your answer, then give it a short label only the reveal will show.' },
+  pick: { label: 'Quick pick', how: 'Tap the one you think most people will pick.' },
+  rather: { label: 'Would you rather', how: 'Pick a side. Everyone on the majority side scores 2.' },
+};
+
 function roundHeader(v) {
   const spot = v.type === 'spotlight';
+  const info = MODE_INFO[v.mode] || MODE_INFO.words;
   return `
   <div class="roundinfo">
-    <span>Round ${v.round} of ${v.settings.rounds}</span>
+    <span>Round ${v.round} of ${v.settings.rounds}${info.label ? ` · <b class="mode-tag">${info.label}</b>` : ''}</span>
     <span id="timer" class="timer"></span>
   </div>
   ${spot ? `<div class="spot-banner" style="--c:${player(v.spotlight)?.color || '#999'}">
@@ -372,12 +422,42 @@ function roundHeader(v) {
   <h1 class="prompt">${esc(v.prompt)}</h1>`;
 }
 
-function answerScreen(v) {
+function answerInput(v) {
   const locked = v.mine && !ui.editing;
-  const waiting = v.players.filter((p) => p.connected && !v.submitted.includes(p.id));
-  return `
-  ${roundHeader(v)}
-  <section class="card">
+  if (v.mode === 'pick' || v.mode === 'rather') {
+    const opts = v.options.map((o, i) => `
+      <button class="opt ${v.mine === o ? 'on' : ''}" data-opt="${i}" aria-pressed="${v.mine === o}">${esc(o)}</button>`);
+    return `<section class="card stack">
+      ${v.mode === 'rather' ? `${opts[0]}<div class="or"><span>or</span></div>${opts[1]}` : `<div class="opts">${opts.join('')}</div>`}
+      <p class="muted small center" style="margin:0">${v.mine ? 'Locked in. Tap another to change your mind.' : MODE_INFO[v.mode].how}</p>
+    </section>`;
+  }
+  if (v.mode === 'sketch') {
+    if (locked) {
+      return `<section class="card center">
+        <canvas class="art art-mid" data-art="${esc(myId)}"></canvas>
+        <p class="locked">${esc(v.mine)}</p>
+        <button id="b-edit" class="ghost">Change drawing</button>
+      </section>`;
+    }
+    const tools = `<div class="tools">
+      ${PALETTE.map((c, i) => `<button class="swatch ${ui.pad.color === i ? 'on' : ''}" data-color="${i}" style="--c:${c}" aria-label="Color ${i + 1}"></button>`).join('')}
+      <span class="tool-gap"></span>
+      <button class="tool ${ui.pad.width === 0 ? 'on' : ''}" data-width="0" aria-label="Thin brush"><i class="dotsz s"></i></button>
+      <button class="tool ${ui.pad.width === 1 ? 'on' : ''}" data-width="1" aria-label="Thick brush"><i class="dotsz l"></i></button>
+      <button class="tool" id="b-undo" aria-label="Undo">↶</button>
+      <button class="tool" id="b-clear" aria-label="Clear">✕</button>
+    </div>`;
+    return `<section class="card stack sketch-card">
+      <canvas id="pad" class="art pad"></canvas>
+      ${tools}
+      <form id="f-answer" class="stack" autocomplete="off">
+        <input id="answer" data-keep maxlength="40" placeholder="Label it (only shown at the reveal)" enterkeyhint="done" autocapitalize="sentences">
+        <button class="primary" type="submit">Lock it in</button>
+      </form>
+    </section>`;
+  }
+  return `<section class="card">
     ${locked ? `
       <p class="muted small">Your answer</p>
       <p class="locked">${esc(v.mine)}</p>
@@ -386,7 +466,14 @@ function answerScreen(v) {
       <input id="answer" data-keep maxlength="40" placeholder="Type your answer" enterkeyhint="done" autocapitalize="sentences">
       <button class="primary" type="submit">Lock it in</button>
     </form>`}
-  </section>
+  </section>`;
+}
+
+function answerScreen(v) {
+  const waiting = v.players.filter((p) => p.connected && !v.submitted.includes(p.id));
+  return `
+  ${roundHeader(v)}
+  ${answerInput(v)}
   <section class="card">
     <ul class="plist inline">${v.players.map((p) => `<li>${chip(p, v.submitted.includes(p.id) ? 'done' : '')}</li>`).join('')}</ul>
     <p class="muted small">${waiting.length ? `Waiting on ${waiting.map((p) => esc(p.name)).join(', ')}` : 'Everyone is in.'}</p>
@@ -394,28 +481,45 @@ function answerScreen(v) {
   </section>`;
 }
 
+function galleryScreen(v) {
+  const tiles = v.gallery.map((id) => `<li><canvas class="art" data-art="${esc(id)}"></canvas></li>`).join('');
+  return `
+  ${roundHeader(v)}
+  <p class="hint">Who drew what? Have a look, then the host shows the answers.</p>
+  <ul class="gallery">${tiles || '<li class="muted">Nobody drew anything this round.</li>'}</ul>
+  ${isHost() ? '<button id="b-unveil" class="primary wide">Show answers</button>' : '<p class="muted center small">Waiting for the host to show the answers…</p>'}`;
+}
+
 function revealScreen(v) {
+  if (!v.unveiled) return galleryScreen(v);
   const host = isHost();
+  const choice = v.mode === 'pick' || v.mode === 'rather';
+  const canMerge = host && !choice;
   const spotG = v.type === 'spotlight' ? v.groups.find((g) => g.members.some((m) => m.id === v.spotlight)) : null;
   const groups = v.groups.map((g) => {
     const n = g.members.length;
     const isSpot = spotG && g.id === spotG.id;
+    const scored = g.members.some((m) => v.points[m.id]);
     return `
-    <li class="group ${n > 1 ? 'match' : ''} ${isSpot ? 'spotg' : ''} ${ui.selected === g.id ? 'sel' : ''}" ${host ? `data-group="${g.id}" tabindex="0" role="button"` : ''}>
-      <div class="gtop"><span class="glabel">${esc(g.label)}</span>${n > 1 ? `<span class="gcount">×${n}</span>` : ''}</div>
-      <div class="gmem">${g.members.map((m) => {
+    <li class="group ${n > 1 || (choice && scored) ? 'match' : ''} ${isSpot ? 'spotg' : ''} ${ui.selected === g.id ? 'sel' : ''}" ${canMerge ? `data-group="${g.id}" tabindex="0" role="button"` : ''}>
+      <div class="gtop"><span class="glabel">${esc(g.label)}</span>${n > 1 || choice ? `<span class="gcount">${choice ? n : '×' + n}</span>` : ''}</div>
+      <div class="gmem">${n ? g.members.map((m) => {
         const p = player(m.id);
         if (!p) return '';
         const pts = v.points[m.id] || 0;
-        return `<span class="mem" ${host && n > 1 ? `data-split="${esc(m.id)}"` : ''}>${chip(p)}${m.text.trim().toLowerCase() !== g.label.trim().toLowerCase() ? `<em>“${esc(m.text)}”</em>` : ''}${pts ? `<b class="pts">+${pts}</b>` : ''}</span>`;
-      }).join('')}</div>
+        const art = v.mode === 'sketch' ? `<canvas class="art art-thumb" data-art="${esc(m.id)}"></canvas>` : '';
+        return `<span class="mem ${art ? 'mem-art' : ''}" ${canMerge && n > 1 ? `data-split="${esc(m.id)}"` : ''}>${art}<span>${chip(p)}${m.text.trim().toLowerCase() !== g.label.trim().toLowerCase() ? `<em>“${esc(m.text)}”</em>` : ''}${pts ? `<b class="pts">+${pts}</b>` : ''}</span></span>`;
+      }).join('') : '<span class="muted small">Nobody</span>'}</div>
     </li>`;
   }).join('');
   const none = v.noAnswer.map(player).filter(Boolean);
   const final = v.round >= v.settings.rounds;
+  let hint = '';
+  if (canMerge) hint = ui.selected ? 'Now tap another answer to merge them.' : 'Tap two answers to merge them if they mean the same thing. Tap a name to split it out.';
+  else if (v.mode === 'rather' && v.type !== 'spotlight') hint = 'The majority side scores 2 each. A tie means nobody scores.';
   return `
   ${roundHeader(v)}
-  ${host ? `<p class="hint">${ui.selected ? 'Now tap another answer to merge them.' : 'Tap two answers to merge them if they mean the same thing. Tap a name to split it out.'}</p>` : ''}
+  ${hint ? `<p class="hint">${hint}</p>` : ''}
   <ul class="groups">${groups || '<li class="muted">No answers this round.</li>'}</ul>
   ${none.length ? `<p class="muted small">No answer: ${none.map((p) => esc(p.name)).join(', ')}</p>` : ''}
   ${scoreboard(v, v.points)}
@@ -486,7 +590,8 @@ function render() {
     next.forEach((n, i) => {
       const o = prev[i];
       if (!o) screen.append(n);
-      else if (o.outerHTML !== n.outerHTML) o.replaceWith(n);
+      // Canvases gain width/height once painted; ignore that so a drawing isn't torn down mid-stroke.
+      else if (o.outerHTML.replace(/ (width|height)="\d+"/g, '') !== n.outerHTML) o.replaceWith(n);
     });
     prev.slice(next.length).forEach((o) => o.remove());
   }
@@ -509,6 +614,9 @@ function render() {
     ? `${statusText ? `<span class="status">${statusText}</span>` : ''}<span class="room">${esc(S.code || '')}</span><button id="b-leave" class="link">Leave</button>`
     : '';
   if ($bar.innerHTML !== bar) $bar.innerHTML = bar;
+  const pad = document.getElementById('pad');
+  if (pad) attachPad(pad, ui.pad, null, () => toast('That drawing is full. Undo or clear to keep going.'));
+  paintAll($app, getArt);
   updateTimer();
 }
 
@@ -540,10 +648,12 @@ document.addEventListener('submit', (e) => {
   }
   if (e.target.id === 'f-answer') {
     const text = document.getElementById('answer').value.trim();
-    if (!text) return;
+    const sketch = S.view && S.view.mode === 'sketch';
+    if (sketch && !ui.pad.strokes.length) return toast('Draw something first.');
+    if (!text) return toast(sketch ? 'Give your drawing a short label.' : 'Type an answer first.');
     ui.draft = text;
     ui.editing = false;
-    act({ t: 'answer', text });
+    act(sketch ? { t: 'answer', text, art: encode(ui.pad.strokes) } : { t: 'answer', text });
   }
   if (e.target.id === 'f-board') {
     const slug = cleanSlug(document.getElementById('board-code').value);
@@ -672,6 +782,7 @@ document.addEventListener('click', async (e) => {
     return;
   }
   if (t.dataset.set) return act({ t: 'settings', [t.dataset.set]: Number(t.dataset.val) });
+  if (t.dataset.mode) return act({ t: 'settings', mode: t.dataset.mode });
   if (t.dataset.kick) {
     const p = player(t.dataset.kick);
     if (p && confirm(`Remove ${p.name} from the room?`)) act({ t: 'kick', id: t.dataset.kick });
@@ -683,6 +794,26 @@ document.addEventListener('click', async (e) => {
   if (id === 'b-next') return act({ t: 'next' });
   if (id === 'b-end') { if (confirm('End the game now and show final scores?')) act({ t: 'end' }); return; }
   if (id === 'b-again') return act({ t: 'again' });
+  if (id === 'b-unveil') return act({ t: 'unveil' });
+
+  // Quick pick / would you rather: tapping an option is the answer.
+  if (t.dataset.opt != null && S.view?.phase === 'answer' && S.view.options) {
+    const text = S.view.options[Number(t.dataset.opt)];
+    ui.draft = text;
+    return act({ t: 'answer', text });
+  }
+
+  // Drawing tools.
+  if (t.dataset.color != null) { ui.pad.color = Number(t.dataset.color); return render(); }
+  if (t.dataset.width != null) { ui.pad.width = Number(t.dataset.width); return render(); }
+  if (id === 'b-undo' || id === 'b-clear') {
+    if (id === 'b-undo') ui.pad.strokes.pop();
+    else if (ui.pad.strokes.length && !confirm('Clear your drawing?')) return;
+    else ui.pad.strokes.length = 0;
+    const pad = document.getElementById('pad');
+    if (pad) paint(pad, ui.pad.strokes);
+    return;
+  }
 
   // Host merge / split on the reveal screen.
   if (isHost() && S.view?.phase === 'reveal') {

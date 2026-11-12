@@ -1,5 +1,10 @@
 // Pure game rules. The host owns a `state` object and feeds actions through `reduce`.
-import { PROMPTS, shuffle } from './prompts.js';
+import { PROMPTS, SKETCHES, PICKS, RATHERS, shuffle } from './prompts.js';
+
+// Round modes. "words" = type an answer, "sketch" = draw it (with a hidden label),
+// "pick" = choose one of four, "rather" = would-you-rather, scored by siding with the majority.
+export const MODES = ['words', 'sketch', 'pick', 'rather'];
+const MAX_ART = 12000; // base64 chars, ~4000 points
 
 export const COLORS = ['#7c9a92', '#c28f6b', '#8a8fbf', '#b5838d', '#6d9dc5', '#a3a86b', '#c9a227', '#9c7bb0', '#5f9e7a', '#c47a7a', '#6b8fa3', '#a68a64'];
 export const MAX_PLAYERS = 12;
@@ -10,10 +15,17 @@ export function newGame(code, hostId, hostName) {
     hostId,
     phase: 'lobby',
     players: [],
-    settings: { rounds: 8, timer: 0, custom: '' },
+    settings: { rounds: 8, timer: 0, custom: '', modes: { words: true, sketch: true, pick: true, rather: true } },
     deck: [],
+    decks: {},
+    plan: [],
     round: 0,
     prompt: '',
+    mode: 'words',
+    options: null,
+    art: {},
+    unveiled: true,
+    gallery: [],
     type: 'crowd',
     spotlight: null,
     answers: {},
@@ -66,6 +78,8 @@ function rekey(s, from, to) {
   const move = (obj) => { if (obj && from in obj) { obj[to] = obj[from]; delete obj[from]; } };
   s.players.find((p) => p.id === from).id = to;
   move(s.answers);
+  move(s.art);
+  s.gallery = (s.gallery || []).map((m) => (m === from ? to : m));
   move(s.points);
   move(s.stats);
   for (const g of s.groups) g.members = g.members.map((m) => (m === from ? to : m));
@@ -120,10 +134,55 @@ function connectedPlayers(s) {
   return s.players.filter((p) => p.connected);
 }
 
+export function enabledModes(settings) {
+  const m = (settings && settings.modes) || {};
+  const on = MODES.filter((k) => m[k]);
+  return on.length ? on : ['words'];
+}
+
+// Mix of round types for the whole game: words twice as common, no special type twice in a row.
+function buildPlan(s) {
+  const on = enabledModes(s.settings);
+  const bag = on.flatMap((m) => (m === 'words' && on.length > 1 ? [m, m] : [m]));
+  const plan = [];
+  let guard = 0;
+  while (plan.length < s.settings.rounds && guard++ < 200) {
+    for (const m of shuffle(bag)) {
+      const prev = plan[plan.length - 1];
+      if (m !== 'words' && m === prev && on.length > 1) continue;
+      plan.push(m);
+    }
+  }
+  plan.length = s.settings.rounds;
+  // Start gently with a plain word round when it's available.
+  const w = plan.indexOf('words');
+  if (w > 0) [plan[0], plan[w]] = [plan[w], plan[0]];
+  return plan;
+}
+
+function draw(s, mode) {
+  s.decks ||= {};
+  if (mode === 'words') {
+    if (!s.deck.length) s.deck = buildDeck(s);
+    return { prompt: s.deck.pop(), options: null };
+  }
+  const src = { sketch: SKETCHES, pick: PICKS, rather: RATHERS }[mode];
+  if (!s.decks[mode] || !s.decks[mode].length) s.decks[mode] = shuffle(src.map((_, i) => i));
+  const item = src[s.decks[mode].pop()];
+  if (mode === 'sketch') return { prompt: item, options: null };
+  if (mode === 'pick') return { prompt: item.q, options: item.o.slice() };
+  return { prompt: 'Would you rather…', options: item.slice() };
+}
+
 function startRound(s) {
-  if (!s.deck.length) s.deck = buildDeck(s);
   s.round += 1;
-  s.prompt = s.deck.pop();
+  s.mode = (s.plan && s.plan[s.round - 1]) || 'words';
+  const d = draw(s, s.mode);
+  s.prompt = d.prompt;
+  s.options = d.options;
+  s.art = {};
+  s.gallery = [];
+  s.unveiled = true;
   s.answers = {};
   s.groups = [];
   s.points = {};
@@ -140,7 +199,8 @@ function startRound(s) {
     s.type = 'crowd';
     s.spotlight = null;
   }
-  s.deadline = s.settings.timer ? Date.now() + s.settings.timer * 1000 : 0;
+  const secs = s.settings.timer * (s.mode === 'sketch' ? 2 : 1);
+  s.deadline = secs ? Date.now() + secs * 1000 : 0;
 }
 
 function buildDeck(s) {
@@ -162,8 +222,15 @@ function reveal(s) {
     byKey.get(key).members.push(id);
   }
   s.groups = [...byKey.values()];
+  // Choice rounds: show every option, even ones nobody picked.
+  if (s.options) {
+    for (const o of s.options) if (!byKey.has(normalize(o))) s.groups.push({ id: s.nextGroupId++, label: o, members: [] });
+  }
   s.phase = 'reveal';
   s.deadline = 0;
+  // Sketch rounds open on an anonymous gallery; the host then shows the answers.
+  s.unveiled = s.mode !== 'sketch';
+  s.gallery = shuffle(Object.keys(s.art).filter((id) => s.answers[id]));
   score(s);
 }
 
@@ -177,6 +244,11 @@ export function score(s) {
       if (id === s.spotlight) pts[id] = spotGroup.members.length - 1;
       else pts[id] = 2;
     }
+  } else if (s.mode === 'rather') {
+    // Read the room: 2 points for everyone on the (strict) majority side.
+    const sizes = s.groups.map((g) => g.members.length).sort((a, b) => b - a);
+    const top = s.groups.find((g) => g.members.length === sizes[0]);
+    if (top && sizes[0] > (sizes[1] || 0) && sizes[0] > 1) for (const id of top.members) pts[id] = 2;
   } else {
     for (const g of s.groups) {
       if (g.members.length < 2) continue;
@@ -225,6 +297,12 @@ function resetToLobby(s) {
   s.phase = 'lobby';
   s.round = 0;
   s.deck = [];
+  s.plan = [];
+  s.art = {};
+  s.gallery = [];
+  s.options = null;
+  s.mode = 'words';
+  s.unveiled = true;
   s.sync = {};
   s.answers = {};
   s.groups = [];
@@ -280,9 +358,18 @@ export function reduce(s, from, a) {
       return maybeAutoReveal(s) || true;
     case 'answer': {
       if (s.phase !== 'answer' || !me) return false;
-      const text = String(a.text || '').trim().slice(0, 40);
+      let text = String(a.text || '').trim().slice(0, 40);
+      if (s.options && text) {
+        text = s.options.find((o) => o === String(a.text)) || '';
+        if (!text) return false;
+      }
+      if (s.mode === 'sketch' && text) {
+        const art = typeof a.art === 'string' && a.art.length <= MAX_ART && /^[A-Za-z0-9+/=]+$/.test(a.art) ? a.art : '';
+        if (!art) return false;
+        s.art[from] = art;
+      }
       if (text) s.answers[from] = text;
-      else delete s.answers[from];
+      else { delete s.answers[from]; delete s.art[from]; }
       maybeAutoReveal(s);
       return true;
     }
@@ -294,6 +381,10 @@ export function reduce(s, from, a) {
       if ([5, 8, 12].includes(a.rounds)) s.settings.rounds = a.rounds;
       if ([0, 45, 90].includes(a.timer)) s.settings.timer = a.timer;
       if (typeof a.custom === 'string') s.settings.custom = a.custom.slice(0, 4000);
+      if (MODES.includes(a.mode)) {
+        const next = { ...s.settings.modes, [a.mode]: !s.settings.modes[a.mode] };
+        if (MODES.some((k) => next[k])) s.settings.modes = next; // keep at least one on
+      }
       return true;
     case 'kick':
       if (a.id === s.hostId) return false;
@@ -301,7 +392,8 @@ export function reduce(s, from, a) {
       delete s.answers[a.id];
       if (s.phase === 'reveal') {
         for (const g of s.groups) g.members = g.members.filter((m) => m !== a.id);
-        s.groups = s.groups.filter((g) => g.members.length);
+        s.groups = s.groups.filter((g) => g.members.length || s.options);
+        s.gallery = s.gallery.filter((m) => m !== a.id);
         score(s);
       }
       maybeAutoReveal(s);
@@ -309,6 +401,7 @@ export function reduce(s, from, a) {
     case 'start':
       if (s.phase !== 'lobby' || connectedPlayers(s).length < 2) return false;
       s.gameId = newId();
+      s.plan = buildPlan(s);
       startRound(s);
       return true;
     case 'reveal':
@@ -335,8 +428,12 @@ export function reduce(s, from, a) {
       score(s);
       return true;
     }
+    case 'unveil':
+      if (s.phase !== 'reveal' || s.unveiled) return false;
+      s.unveiled = true;
+      return true;
     case 'next':
-      if (s.phase !== 'reveal') return false;
+      if (s.phase !== 'reveal' || !s.unveiled) return false;
       bank(s);
       if (s.round >= s.settings.rounds) s.phase = 'final';
       else startRound(s);
@@ -383,6 +480,12 @@ export function setConnected(s, id, on) {
   return true;
 }
 
+// All drawings for the current sketch round, once they may be seen (after the reveal).
+export function artFor(s) {
+  if (s.mode !== 'sketch' || s.phase !== 'reveal') return null;
+  return { round: s.round, art: { ...s.art } };
+}
+
 // What a given player is allowed to see.
 export function viewFor(s, pid) {
   const v = {
@@ -400,11 +503,21 @@ export function viewFor(s, pid) {
     save: s.save,
   };
   if (pid === s.hostId) v.custom = s.settings.custom;
+  v.settings.modes = { ...s.settings.modes };
+  v.mode = s.mode;
+  v.options = s.options;
   if (s.phase === 'answer') {
     v.submitted = Object.keys(s.answers);
     v.mine = s.answers[pid] || '';
   }
-  if (s.phase === 'reveal') {
+  // Drawings travel separately (see artFor) so they aren't repeated in every player's view.
+  if (s.phase === 'reveal' && !s.unveiled) {
+    v.unveiled = false;
+    v.gallery = s.gallery;
+    v.noAnswer = [];
+    v.points = {};
+  } else if (s.phase === 'reveal') {
+    v.unveiled = true;
     v.groups = s.groups.map((g) => ({ id: g.id, label: g.label, members: g.members.map((m) => ({ id: m, text: s.answers[m] })) }));
     v.points = s.points;
     v.noAnswer = s.players.filter((p) => !s.answers[p.id]).map((p) => p.id);
