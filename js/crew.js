@@ -18,10 +18,10 @@ async function rpc(fn, args) {
   return body;
 }
 
-export const createCrew = (name, pin) => rpc('create_crew', { p_name: name, p_pin: pin });
-export const checkCrew = (slug, pin) => rpc('check_crew', { p_slug: slug, p_pin: pin });
-export const submitGame = (slug, pin, game) => rpc('submit_game', { p_slug: slug, p_pin: pin, p_game: game });
-export const getLeaderboard = (slug) => rpc('get_leaderboard', { p_slug: slug });
+export const createCrew = (name, pin) => rpc('cg_create_crew', { p_name: name, p_pin: pin });
+export const checkCrew = (slug, pin) => rpc('cg_check_crew', { p_slug: slug, p_pin: pin });
+export const submitGame = (slug, pin, game) => rpc('cg_submit_game', { p_slug: slug, p_pin: pin, p_game: game });
+export const getLeaderboard = (slug) => rpc('cg_get_leaderboard', { p_slug: slug });
 
 export function cleanSlug(s) {
   return String(s || '').toLowerCase().trim().replace(/[^a-z0-9-]/g, '').slice(0, 40);
