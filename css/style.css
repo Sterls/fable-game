@@ -169,3 +169,26 @@ button:focus-visible, [data-group]:focus-visible { outline: 2px solid var(--acce
   opacity: 0; pointer-events: none; transition: opacity 0.25s, transform 0.25s; max-width: calc(100% - 32px);
 }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------- crew stats & leaderboard ---------- */
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+.tight { margin: 4px 0; }
+.seg-wide { display: flex; margin: 12px 0 4px; background: var(--card); }
+.seg-wide button { flex: 1; padding: 10px 4px; font-size: 14px; }
+.lb { list-style: none; padding: 0; margin: 10px 0; display: flex; flex-direction: column; gap: 8px; }
+.lb-row { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; cursor: pointer; }
+.lb-row.open { border-color: var(--accent); }
+.lb-main { display: flex; align-items: center; gap: 12px; }
+.lb-rank { width: 22px; color: var(--muted); font-weight: 700; font-variant-numeric: tabular-nums; flex: none; }
+.lb-name { flex: 1; min-width: 0; font-weight: 650; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.lb-val { text-align: right; font-weight: 700; font-size: 20px; font-variant-numeric: tabular-nums; line-height: 1.1; }
+.lb-val small { display: block; font-size: 11px; font-weight: 500; color: var(--muted); }
+.lb-sub { font-size: 13px; margin: 2px 0 0 34px; }
+.badge { font-size: 11px; font-weight: 600; color: var(--accent); background: var(--accent-soft); border-radius: 999px; padding: 1px 8px; }
+.lb-detail { margin: 10px 0 0 34px; display: grid; gap: 6px; font-size: 14px; }
+.lb-detail div { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--line); padding-top: 6px; }
+.lb-detail dt { color: var(--muted); }
+.lb-detail dd { margin: 0; text-align: right; font-weight: 600; }
+.pairs { list-style: none; padding: 0; margin: 0; }
+.pairs li { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); flex-wrap: wrap; }
+.pairs li:first-child { border-top: none; }

@@ -22,6 +22,11 @@ export function newGame(code, hostId, hostName) {
     sync: {},
     deadline: 0,
     nextGroupId: 1,
+    stats: {},
+    played: 0,
+    gameId: null,
+    crew: null, // { slug, name } when results are saved to a Supabase crew
+    save: null, // null | 'saving' | 'saved' | 'error'
     updated: Date.now(),
   };
   addPlayer(s, hostId, hostName);
@@ -29,18 +34,28 @@ export function newGame(code, hostId, hostName) {
 }
 
 function addPlayer(s, id, name) {
-  name = cleanName(name);
+  name = uniqueName(s, id, cleanName(name) || 'Player');
   const existing = s.players.find((p) => p.id === id);
   if (existing) {
-    existing.name = name || existing.name;
+    existing.name = name;
     existing.connected = true;
     return true;
   }
   if (s.players.length >= MAX_PLAYERS) return false;
   const used = new Set(s.players.map((p) => p.color));
   const color = COLORS.find((c) => !used.has(c)) || COLORS[s.players.length % COLORS.length];
-  s.players.push({ id, name: name || 'Player', score: 0, connected: true, color, spot: 0 });
+  s.players.push({ id, name, score: 0, connected: true, color, spot: 0 });
   return true;
+}
+
+// Names identify people on the crew leaderboard, so two players can't share one.
+function uniqueName(s, id, name) {
+  const taken = new Set(s.players.filter((p) => p.id !== id).map((p) => p.name.toLowerCase()));
+  if (!taken.has(name.toLowerCase())) return name;
+  for (let i = 2; ; i++) {
+    const n = `${name.slice(0, 13)} ${i}`;
+    if (!taken.has(n.toLowerCase())) return n;
+  }
 }
 
 export function cleanName(n) {
@@ -142,7 +157,28 @@ export function score(s) {
 }
 
 function bank(s) {
-  for (const p of s.players) p.score += s.points[p.id] || 0;
+  s.played += 1;
+  const spotG = s.type === 'spotlight' && s.groups.find((g) => g.members.includes(s.spotlight));
+  for (const p of s.players) {
+    p.score += s.points[p.id] || 0;
+    const g = s.groups.find((x) => x.members.includes(p.id));
+    if (!g && !p.connected) continue;
+    const st = (s.stats[p.id] ||= { rounds: 0, answered: 0, matched: 0, lone: 0, spotTurns: 0, spotMatchers: 0, spotTries: 0, spotHits: 0 });
+    st.rounds++;
+    if (!g) continue;
+    st.answered++;
+    if (g.members.length > 1) st.matched++;
+    else st.lone++;
+    if (spotG) {
+      if (p.id === s.spotlight) {
+        st.spotTurns++;
+        st.spotMatchers += spotG.members.length - 1;
+      } else {
+        st.spotTries++;
+        if (g === spotG) st.spotHits++;
+      }
+    }
+  }
   for (const g of s.groups) {
     const m = g.members;
     for (let i = 0; i < m.length; i++)
@@ -162,8 +198,41 @@ function resetToLobby(s) {
   s.answers = {};
   s.groups = [];
   s.points = {};
+  s.stats = {};
+  s.played = 0;
+  s.gameId = null;
+  s.save = null;
   s.players = s.players.filter((p) => p.connected);
   for (const p of s.players) { p.score = 0; p.spot = 0; }
+}
+
+function newId() {
+  if (globalThis.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === 'x' ? r : (r & 3) | 8).toString(16);
+  });
+}
+
+// Payload for Supabase submit_game(); null if there's nothing worth saving.
+export function results(s) {
+  const ps = s.players.filter((p) => s.stats[p.id] && s.stats[p.id].rounds);
+  if (ps.length < 2 || !s.played || !s.gameId) return null;
+  const top = Math.max(...ps.map((p) => p.score));
+  const players = ps.map((p) => ({
+    name: p.name,
+    score: p.score,
+    place: 1 + ps.filter((q) => q.score > p.score).length,
+    won: top > 0 && p.score === top,
+    ...s.stats[p.id],
+  }));
+  const pairs = [];
+  for (let i = 0; i < ps.length; i++)
+    for (let j = i + 1; j < ps.length; j++) {
+      const k = [ps[i].id, ps[j].id].sort().join('|');
+      pairs.push({ a: ps[i].name, b: ps[j].name, n: s.sync[k] || 0 });
+    }
+  return { id: s.gameId, rounds: s.played, players, pairs };
 }
 
 // Returns true if state changed.
@@ -208,6 +277,7 @@ export function reduce(s, from, a) {
       return true;
     case 'start':
       if (s.phase !== 'lobby' || connectedPlayers(s).length < 2) return false;
+      s.gameId = newId();
       startRound(s);
       return true;
     case 'reveal':
@@ -247,6 +317,10 @@ export function reduce(s, from, a) {
       return true;
     case 'again':
       resetToLobby(s);
+      return true;
+    case 'crew':
+      // The host app verifies the code + PIN with Supabase before sending this.
+      s.crew = a.crew && a.crew.slug ? { slug: String(a.crew.slug), name: String(a.crew.name || a.crew.slug) } : null;
       return true;
   }
   return false;
@@ -291,6 +365,8 @@ export function viewFor(s, pid) {
     type: s.type,
     spotlight: s.spotlight,
     remaining: s.deadline ? Math.max(0, s.deadline - Date.now()) : 0,
+    crew: s.crew,
+    save: s.save,
   };
   if (pid === s.hostId) v.custom = s.settings.custom;
   if (s.phase === 'answer') {
@@ -306,6 +382,7 @@ export function viewFor(s, pid) {
     let best = null;
     for (const [k, n] of Object.entries(s.sync)) if (!best || n > best.n) best = { ids: k.split('|'), n };
     v.best = best;
+    v.mystats = s.stats[pid] || null;
   }
   return v;
 }

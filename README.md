@@ -48,6 +48,33 @@ The site is a full PWA: it has a manifest, a service worker, and 192px, 512px an
 - **Keeping the host alive:** the host's device must stay on the game. If the host closes it, the room ends. On phones, the host should keep the screen awake.
 - **If you outgrow PeerJS:** if some networks (strict corporate or school Wi-Fi) block peer-to-peer connections, or you want rooms to survive the host leaving, `js/net.js` is the only file to change. A Cloudflare Worker with a Durable Object would make a good drop-in relay, since it fits the same small host/client interface.
 
+## Crew stats & leaderboard (Supabase)
+
+A **crew** is a friend group with a permanent, shared leaderboard. The host links a crew in the lobby, and every finished game is saved to it automatically.
+
+**What's tracked:**
+- **Each player:** wins, win rate, points per round, and "in sync" (the share of rounds where someone matched you).
+- **Lone answers:** rounds where nobody matched you.
+- **Spotlight:** how many people matched you, and how often you matched the spotlight player.
+- **Pairs:** a sync rate for every pair of players.
+- **Badges:** Hive mind, Wildcard, Open book and Mind reader, awarded after 2+ games.
+
+**Setup (one time):**
+1. In the Supabase dashboard, open the **SQL editor**, paste in `supabase/schema.sql` and run it.
+2. Under **Project Settings → API Keys**, copy the **publishable** key (or the legacy `anon` key) into `SUPABASE_KEY` in `js/config.js`. This key is meant to be public.
+
+**Using it:**
+- In the lobby, the host taps **Create a crew** and picks a name and PIN. Players get a crew code like `game-night-k7qp`.
+- Anyone with the code can view the leaderboard. They can open it from the home screen or a `?crew=<code>` link.
+- Saving a game requires the PIN, and the host's device remembers it.
+- Players are matched by name within a crew, ignoring case. Keep using the same name to keep your stats.
+
+**Security:**
+- The browser can't read or write the tables directly. Row-level security is on, there are no policies, and table grants are revoked.
+- The browser can only call four functions: `create_crew`, `check_crew`, `submit_game` and `get_leaderboard`.
+- PINs are stored as bcrypt hashes.
+- Saving the same game twice is ignored.
+
 ## Files
 
 | File | Purpose |
@@ -56,4 +83,7 @@ The site is a full PWA: it has a manifest, a service worker, and 192px, 512px an
 | `js/net.js` | Transport: PeerJS, plus BroadcastChannel for `?local=1` testing |
 | `js/app.js` | UI and session handling |
 | `js/prompts.js` | Built-in prompts (~160) |
+| `js/crew.js`, `js/config.js` | Supabase client and project settings |
+| `js/board.js` | Crew leaderboard screen |
+| `supabase/schema.sql` | Database tables and functions (paste into the Supabase SQL editor) |
 | `vendor/peerjs.min.js` | PeerJS 1.5.4 (MIT), vendored so the app works offline and inside app wrappers |

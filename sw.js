@@ -1,6 +1,6 @@
 // App-shell cache so the game loads instantly and installs as a PWA.
 // Bump VERSION whenever you deploy changes.
-const VERSION = 'cg-v1';
+const VERSION = 'cg-v2';
 const SHELL = [
   './',
   'index.html',
@@ -9,6 +9,9 @@ const SHELL = [
   'js/game.js',
   'js/net.js',
   'js/prompts.js',
+  'js/config.js',
+  'js/crew.js',
+  'js/board.js',
   'vendor/peerjs.min.js',
   'manifest.webmanifest',
   'icons/icon.svg',

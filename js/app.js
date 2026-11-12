@@ -1,5 +1,7 @@
 import { createHost, createClient, useLocal } from './net.js';
-import { newGame, reduce, viewFor, tick, setConnected, cleanName, MAX_PLAYERS } from './game.js';
+import { newGame, reduce, viewFor, tick, setConnected, cleanName, results, MAX_PLAYERS } from './game.js';
+import { crewEnabled, createCrew, checkCrew, submitGame, getLeaderboard, cleanSlug } from './crew.js';
+import { boardScreen } from './board.js';
 
 const $app = document.getElementById('app');
 const $bar = document.getElementById('bar-right');
@@ -22,7 +24,11 @@ if (!myId) { myId = 'p' + Math.random().toString(36).slice(2, 12); try { idStore
 
 // role: null | 'host' | 'client'
 let S = { role: null, code: null, view: null, net: null, state: null, conns: new Map(), status: 'ok', joinErr: '' };
-const ui = { draft: '', editing: false, selected: null, deadlineAt: 0, showHelp: false, showCustom: false };
+const ui = {
+  draft: '', editing: false, selected: null, deadlineAt: 0, showHelp: false, showCustom: false,
+  crewForm: null, crewBusy: false, crewErr: '',
+  board: null, // { slug, data, loading, err, sort, open }
+};
 
 const ALPHA = 'BCDFGHJKLMNPQRSTVWXZ';
 function newCode() {
@@ -33,7 +39,13 @@ function newCode() {
 
 function hostRoom(name, resume) {
   const state = resume || newGame(newCode(), myId, name);
-  if (resume) for (const p of state.players) p.connected = p.id === myId;
+  if (resume) {
+    for (const p of state.players) p.connected = p.id === myId;
+    if (state.save === 'saving') state.save = 'error';
+  } else {
+    const crew = store.get('crew');
+    if (crewEnabled() && crew && crew.slug) state.crew = { slug: crew.slug, name: crew.name };
+  }
   S = { role: 'host', code: state.code, view: null, state, conns: new Map(), status: 'connecting', joinErr: '' };
   S.net = createHost(state.code, {
     onOpen() { S.status = 'ok'; render(); },
@@ -75,6 +87,25 @@ function sync() {
   store.set('host', s);
   for (const [connId, pid] of S.conns) S.net.send(connId, { t: 'view', v: viewFor(s, pid) });
   receive(viewFor(s, myId));
+  if (s.phase === 'final' && s.crew && !s.save) saveResults();
+}
+
+// Host only: push the finished game to the crew leaderboard. Safe to retry (idempotent).
+function saveResults() {
+  const s = S.state;
+  const crew = store.get('crew');
+  const payload = results(s);
+  if (!payload || !crew || crew.slug !== s.crew.slug) {
+    s.save = payload ? 'error' : 'skipped';
+    S.saveErr = payload ? 'This device doesn’t have the crew PIN. Link the crew again.' : '';
+    return sync();
+  }
+  s.save = 'saving';
+  sync();
+  submitGame(crew.slug, crew.pin, payload)
+    .then(() => { s.save = 'saved'; })
+    .catch((e) => { s.save = 'error'; S.saveErr = e.message; })
+    .finally(() => { if (S.state === s) sync(); });
 }
 
 function act(a) {
@@ -206,6 +237,15 @@ function homeScreen() {
     <button type="button" id="b-create" class="${invite ? '' : 'primary-soft'}">Create a new room</button>
     ${canResume ? `<button type="button" id="b-resume" class="ghost">Resume hosting room ${esc(hosted.code)}</button>` : ''}
   </form>
+  ${crewEnabled() ? `
+  <section class="card stack">
+    <h2>Crew leaderboard</h2>
+    <p class="muted small" style="margin:-6px 0 0">See how your friend group stacks up across every game.</p>
+    <form id="f-board" class="row" autocomplete="off">
+      <input id="board-code" data-keep class="grow" placeholder="Crew code" aria-label="Crew code" value="${esc((store.get('crew') || {}).slug || store.get('board', ''))}" autocapitalize="none" spellcheck="false">
+      <button type="submit">View</button>
+    </form>
+  </section>` : ''}
   <section class="card">
     <button class="link" id="b-help" aria-expanded="${ui.showHelp}">How to play ${ui.showHelp ? '−' : '+'}</button>
     ${ui.showHelp ? `
@@ -248,7 +288,63 @@ function lobbyScreen(v) {
       <p class="muted small">Your prompts are played first.</p>` : ''}
       <button class="primary" id="b-start" ${enough ? '' : 'disabled'}>${enough ? 'Start game' : 'Need at least 2 players'}</button>`
     : `<p class="muted center small">The host will start the game when everyone's here.${v.settings.customCount ? ` ${v.settings.customCount} custom prompt(s) added.` : ''}</p>`}
-  </section>`;
+  </section>
+  ${crewSection(v)}`;
+}
+
+function crewSection(v) {
+  if (!crewEnabled()) return '';
+  const view = v.crew ? `<button class="ghost" data-board="${esc(v.crew.slug)}">View leaderboard</button>` : '';
+  if (!isHost()) {
+    return v.crew ? `<section class="card stack"><h2>Crew stats</h2>
+      <p class="muted small" style="margin:-6px 0 0">Results from this game save to the <b>${esc(v.crew.name)}</b> leaderboard.</p>${view}</section>` : '';
+  }
+  const err = ui.crewErr ? `<p class="notice small">${esc(ui.crewErr)}</p>` : '';
+  const busy = ui.crewBusy ? 'disabled' : '';
+  let body;
+  if (ui.crewForm === 'link') {
+    body = `<form id="f-crew-link" class="stack" autocomplete="off">
+      <label>Crew code<input id="crew-code" data-keep required placeholder="e.g. game-night-k7qp" autocapitalize="none" spellcheck="false"></label>
+      <label>Crew PIN<input id="crew-pin" data-keep required type="password" minlength="4" maxlength="32" autocomplete="off"></label>
+      ${err}
+      <div class="row"><button type="button" id="b-crew-cancel" class="ghost grow">Cancel</button><button class="primary grow" ${busy}>${ui.crewBusy ? 'Checking…' : 'Link crew'}</button></div>
+    </form>`;
+  } else if (ui.crewForm === 'create') {
+    body = `<form id="f-crew-create" class="stack" autocomplete="off">
+      <label>Crew name<input id="crew-name" data-keep required maxlength="40" placeholder="e.g. Game Night"></label>
+      <label>Choose a PIN<input id="crew-pin" data-keep required type="password" minlength="4" maxlength="32" autocomplete="new-password"></label>
+      <p class="muted small" style="margin:0">Anyone with the crew code can view the leaderboard. Only people with the PIN can save games to it, so share the PIN with whoever hosts.</p>
+      ${err}
+      <div class="row"><button type="button" id="b-crew-cancel" class="ghost grow">Cancel</button><button class="primary grow" ${busy}>${ui.crewBusy ? 'Creating…' : 'Create crew'}</button></div>
+    </form>`;
+  } else if (v.crew) {
+    body = `<p class="muted small" style="margin:-6px 0 0">Results save to <b>${esc(v.crew.name)}</b> <span class="mono">(${esc(v.crew.slug)})</span>.</p>
+      ${view}
+      <div class="row"><button id="b-crew-link" class="link">Switch crew</button><button id="b-crew-unlink" class="link" style="margin-left:auto">Don’t save this game</button></div>`;
+  } else {
+    body = `<p class="muted small" style="margin:-6px 0 0">Save results to a shared leaderboard so your group can compare stats over time.</p>
+      <div class="row"><button id="b-crew-link" class="ghost grow">Link a crew</button><button id="b-crew-create" class="ghost grow">Create a crew</button></div>`;
+  }
+  return `<section class="card stack"><h2>Crew stats</h2>${body}</section>`;
+}
+
+function saveLine(v) {
+  if (!v.crew || !v.save || v.save === 'skipped') return '';
+  const name = `<b>${esc(v.crew.name)}</b>`;
+  if (v.save === 'saving') return `<p class="muted small">Saving to ${name}…</p>`;
+  if (v.save === 'saved') return `<p class="small">Saved to ${name} ✓</p><button class="ghost" data-board="${esc(v.crew.slug)}">View crew leaderboard</button>`;
+  return isHost()
+    ? `<p class="notice small">Couldn’t save to the crew leaderboard. ${esc(S.saveErr || '')}</p><button id="b-save-retry" class="ghost">Try again</button>`
+    : '<p class="muted small">The results couldn’t be saved to the crew leaderboard.</p>';
+}
+
+function myStatsCard(v) {
+  const st = v.mystats;
+  if (!st || !st.answered) return '';
+  const lines = [`You matched someone in <b>${st.matched} of ${st.answered}</b> rounds.`];
+  if (st.spotTurns) lines.push(`In the spotlight, ${st.spotMatchers} ${st.spotMatchers === 1 ? 'person' : 'people'} matched you.`);
+  if (st.spotTries) lines.push(`You matched the spotlight player in ${st.spotHits} of ${st.spotTries} tries.`);
+  return `<section class="card"><h2>Your game</h2>${lines.map((l) => `<p class="tight">${l}</p>`).join('')}</section>`;
 }
 
 function roundHeader(v) {
@@ -339,8 +435,10 @@ function finalScreen(v) {
     <h1>${winners.map((w) => esc(w.name)).join(' & ')} ${winners.length > 1 ? 'tie' : 'wins'}</h1>
     <p class="muted">${top} point${top === 1 ? '' : 's'}</p>
     ${best ? `<p class="sync">Most in sync: <b>${esc(pname(best.ids[0]))}</b> &amp; <b>${esc(pname(best.ids[1]))}</b>, who matched ${best.n} time${best.n === 1 ? '' : 's'}</p>` : ''}
+    ${saveLine(v)}
   </section>
   ${scoreboard(v)}
+  ${myStatsCard(v)}
   ${isHost() ? '<button id="b-again" class="primary wide">Play again</button>' : '<p class="muted center small">Waiting for the host to start another game…</p>'}`;
 }
 
@@ -349,10 +447,11 @@ function finalScreen(v) {
 function render() {
   const v = S.view;
   let html;
-  if (!S.role) html = homeScreen();
+  if (ui.board) html = boardScreen(ui.board);
+  else if (!S.role) html = homeScreen();
   else if (!v) html = `<section class="card center"><p class="muted">${S.status === 'error' ? 'Having trouble connecting…' : 'Connecting…'}</p></section>`;
   else html = { lobby: lobbyScreen, answer: answerScreen, reveal: revealScreen, final: finalScreen }[v.phase](v);
-  const key = S.role ? (v ? v.phase + v.round : 'wait') : 'home';
+  const key = ui.board ? 'board' : S.role ? (v ? v.phase + v.round : 'wait') : 'home';
 
   // Patch only the top-level blocks that changed, so a focused input (and the
   // phone keyboard) survives other players' updates.
@@ -436,7 +535,46 @@ document.addEventListener('submit', (e) => {
     ui.editing = false;
     act({ t: 'answer', text });
   }
+  if (e.target.id === 'f-board') {
+    const slug = cleanSlug(document.getElementById('board-code').value);
+    if (slug.length < 3) return toast('Enter a crew code.');
+    openBoard(slug);
+  }
+  if (e.target.id === 'f-crew-link' || e.target.id === 'f-crew-create') {
+    if (ui.crewBusy) return;
+    const creating = e.target.id === 'f-crew-create';
+    const pin = document.getElementById('crew-pin').value;
+    const arg = creating ? document.getElementById('crew-name').value.trim() : cleanSlug(document.getElementById('crew-code').value);
+    ui.crewBusy = true;
+    ui.crewErr = '';
+    render();
+    (creating ? createCrew(arg, pin) : checkCrew(arg, pin))
+      .then((crew) => {
+        store.set('crew', { slug: crew.slug, name: crew.name, pin });
+        ui.crewForm = null;
+        act({ t: 'crew', crew: { slug: crew.slug, name: crew.name } });
+        toast(creating ? `Crew created. Code: ${crew.slug}` : `Linked to ${crew.name}`);
+      })
+      .catch((err) => { ui.crewErr = err.message; })
+      .finally(() => { ui.crewBusy = false; render(); });
+  }
 });
+
+function openBoard(slug) {
+  ui.board = { slug, data: null, err: '', sort: store.get('sort', 'wins'), open: null };
+  store.set('board', slug);
+  window.scrollTo(0, 0);
+  render();
+  getLeaderboard(slug)
+    .then((data) => { if (ui.board && ui.board.slug === slug) { ui.board.data = data; render(); } })
+    .catch((err) => { if (ui.board && ui.board.slug === slug) { ui.board.err = err.message; render(); } });
+}
+
+function boardUrl(slug) {
+  const q = new URLSearchParams();
+  q.set('crew', slug);
+  return location.origin + location.pathname + '?' + q;
+}
 
 document.addEventListener('input', (e) => {
   if (e.target.id === 'answer') ui.draft = e.target.value;
@@ -458,16 +596,42 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
-  if ((e.key === 'Enter' || e.key === ' ') && e.target.dataset && e.target.dataset.group) {
+  if ((e.key === 'Enter' || e.key === ' ') && e.target.dataset && (e.target.dataset.group || e.target.dataset.lb)) {
     e.preventDefault();
     e.target.click();
   }
 });
 
 document.addEventListener('click', async (e) => {
-  const t = e.target.closest('button, [data-group]');
+  const t = e.target.closest('button, [data-group], [data-lb]');
   if (!t) return;
   const id = t.id;
+
+  // Leaderboard
+  if (t.dataset.board) return openBoard(t.dataset.board);
+  if (id === 'b-board-back') {
+    ui.board = null;
+    if (new URLSearchParams(location.search).has('crew')) history.replaceState(null, '', S.role ? shareUrl() : location.pathname);
+    return render();
+  }
+  if (id === 'b-board-retry') return openBoard(ui.board.slug);
+  if (t.dataset.sort) { ui.board.sort = t.dataset.sort; store.set('sort', t.dataset.sort); return render(); }
+  if (t.dataset.lb) { ui.board.open = ui.board.open === t.dataset.lb ? null : t.dataset.lb; return render(); }
+  if (id === 'b-board-share') {
+    const url = boardUrl(ui.board.slug);
+    if (navigator.share) {
+      try { await navigator.share({ title: 'Common Ground leaderboard', text: `Our Common Ground leaderboard (crew code ${ui.board.slug})`, url }); } catch {}
+    } else {
+      try { await navigator.clipboard.writeText(url); toast('Leaderboard link copied'); } catch { prompt('Copy this link', url); }
+    }
+    return;
+  }
+
+  // Crew linking (host, lobby)
+  if (id === 'b-crew-link' || id === 'b-crew-create') { ui.crewForm = id === 'b-crew-link' ? 'link' : 'create'; ui.crewErr = ''; return render(); }
+  if (id === 'b-crew-cancel') { ui.crewForm = null; ui.crewErr = ''; return render(); }
+  if (id === 'b-crew-unlink') return act({ t: 'crew', crew: null });
+  if (id === 'b-save-retry' && S.role === 'host') { S.state.save = null; return sync(); }
 
   if (id === 'b-create' || id === 'b-resume') {
     const nameEl = document.getElementById('name');
@@ -536,7 +700,11 @@ window.addEventListener('pagehide', () => {
   if (S.role === 'client' && S.net) S.net.send({ t: 'leave' });
 });
 
-render();
+{
+  const crewParam = cleanSlug(new URLSearchParams(location.search).get('crew'));
+  if (crewEnabled() && crewParam.length >= 3) openBoard(crewParam);
+  else render();
+}
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});
