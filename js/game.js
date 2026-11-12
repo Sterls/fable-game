@@ -27,6 +27,8 @@ export function newGame(code, hostId, hostName) {
     unveiled: true,
     gallery: [],
     history: [], // one entry per finished round, for the end-of-game recap
+    prompts: {}, // pid -> custom prompts that player added in the lobby
+    promptBy: null, // pid who wrote the current prompt, if custom
     historyArt: {}, // round -> { pid: drawing }
     type: 'crowd',
     spotlight: null,
@@ -83,9 +85,11 @@ function rekey(s, from, to) {
   move(s.art);
   for (const h of s.history || []) for (const g of h.groups) for (const m of g.members) if (m.id === from) m.id = to;
   for (const r of Object.values(s.historyArt || {})) move(r);
-  if (s.history) for (const h of s.history) if (h.spotlight === from) h.spotlight = to;
+  if (s.history) for (const h of s.history) { if (h.spotlight === from) h.spotlight = to; if (h.by === from) h.by = to; }
   s.gallery = (s.gallery || []).map((m) => (m === from ? to : m));
   move(s.points);
+  move(s.prompts);
+  if (s.promptBy === from) s.promptBy = to;
   move(s.stats);
   for (const g of s.groups) g.members = g.members.map((m) => (m === from ? to : m));
   if (s.spotlight === from) s.spotlight = to;
@@ -169,7 +173,13 @@ function draw(s, mode) {
   s.decks ||= {};
   if (mode === 'words') {
     if (!s.deck.length) s.deck = buildDeck(s);
-    return { prompt: s.deck.pop(), options: null };
+    const item = s.deck.pop();
+    if (typeof item === 'string') return { prompt: item, options: null };
+    // A player's prompt: credit them, and use it up so "Play again" brings fresh ones.
+    const mine = (s.prompts || {})[item.by];
+    if (mine && mine.includes(item.t)) mine.splice(mine.indexOf(item.t), 1);
+    else if (item.by === s.hostId && s.settings.custom) s.settings.custom = s.settings.custom.split('\n').filter((l) => l.trim() !== item.t).join('\n');
+    return { prompt: item.t, options: null, by: item.by };
   }
   const src = { sketch: SKETCHES, pick: PICKS, rather: RATHERS }[mode];
   if (!s.decks[mode] || !s.decks[mode].length) s.decks[mode] = shuffle(src.map((_, i) => i));
@@ -184,6 +194,7 @@ function startRound(s) {
   s.mode = (s.plan && s.plan[s.round - 1]) || 'words';
   const d = draw(s, s.mode);
   s.prompt = d.prompt;
+  s.promptBy = d.by || null;
   s.options = d.options;
   s.art = {};
   s.gallery = [];
@@ -208,14 +219,23 @@ function startRound(s) {
   s.deadline = secs ? Date.now() + secs * 1000 : 0;
 }
 
+export const MAX_PROMPTS_EACH = 20;
+
 function buildDeck(s) {
-  const custom = s.settings.custom
-    .split('\n')
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .slice(0, 100);
+  const custom = [];
+  for (const p of s.players) for (const t of (s.prompts || {})[p.id] || []) custom.push({ t, by: p.id });
+  // Rooms from older versions kept the host's prompts in settings.custom.
+  for (const t of String(s.settings.custom || '').split('\n').map((l) => l.trim()).filter(Boolean)) custom.push({ t, by: s.hostId });
   // Custom prompts go on top (end of array = drawn first), in shuffled order.
-  return shuffle(PROMPTS).concat(shuffle(custom));
+  return shuffle(PROMPTS).concat(shuffle(custom).slice(0, 200));
+}
+
+function cleanPrompts(text) {
+  return String(text || '')
+    .split('\n')
+    .map((l) => l.replace(/\s+/g, ' ').trim().slice(0, 80))
+    .filter(Boolean)
+    .slice(0, MAX_PROMPTS_EACH);
 }
 
 function reveal(s) {
@@ -270,6 +290,7 @@ function bank(s) {
     round: s.round,
     mode: s.mode,
     prompt: s.prompt,
+    by: s.promptBy || null,
     options: s.options,
     type: s.type,
     spotlight: s.spotlight,
@@ -376,6 +397,10 @@ export function reduce(s, from, a) {
       if (s.phase === 'lobby') s.players = s.players.filter((p) => p.id !== from);
       else me.connected = false;
       return maybeAutoReveal(s) || true;
+    case 'prompts':
+      if (s.phase !== 'lobby' || !me) return false;
+      (s.prompts ||= {})[from] = cleanPrompts(a.text);
+      return true;
     case 'answer': {
       if (s.phase !== 'answer' || !me) return false;
       let text = String(a.text || '').trim().slice(0, 40);
@@ -409,6 +434,7 @@ export function reduce(s, from, a) {
     case 'kick':
       if (a.id === s.hostId) return false;
       s.players = s.players.filter((p) => p.id !== a.id);
+      if (s.prompts) delete s.prompts[a.id];
       delete s.answers[a.id];
       if (s.phase === 'reveal') {
         for (const g of s.groups) g.members = g.members.filter((m) => m !== a.id);
@@ -519,7 +545,7 @@ export function viewFor(s, pid) {
     hostId: s.hostId,
     phase: s.phase,
     players: s.players.map(({ id, name, score, connected, color }) => ({ id, name, score, connected, color })),
-    settings: { rounds: s.settings.rounds, timer: s.settings.timer, customCount: s.settings.custom.split('\n').filter((l) => l.trim()).length },
+    settings: { rounds: s.settings.rounds, timer: s.settings.timer, customCount: 0 },
     round: s.round,
     prompt: s.prompt,
     type: s.type,
@@ -528,7 +554,12 @@ export function viewFor(s, pid) {
     crew: s.crew,
     save: s.save,
   };
-  if (pid === s.hostId) v.custom = s.settings.custom;
+  // Custom prompts stay secret: you see your own, everyone sees how many each person added.
+  v.myPrompts = ((s.prompts || {})[pid] || []).join('\n');
+  v.promptCounts = s.players
+    .map((p) => ({ id: p.id, n: ((s.prompts || {})[p.id] || []).length + (p.id === s.hostId ? cleanPrompts(s.settings.custom).length : 0) }))
+    .filter((x) => x.n);
+  v.promptBy = s.promptBy || null;
   v.settings.modes = { ...s.settings.modes };
   v.mode = s.mode;
   v.options = s.options;

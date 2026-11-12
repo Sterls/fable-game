@@ -21,7 +21,7 @@ A calm party game for a group of friends. Everyone answers the same prompt in se
    - **Would you rather 🌶️:** a spicy (not explicit) two-way dilemma. Everyone on the majority side scores 2; a tie scores nothing.
 7. At the end you see the winner and the **most in-sync pair**.
 
-The host can choose 5, 8 or 12 rounds, set an optional 45 or 90 second timer, and add custom prompts (inside jokes work well). Custom prompts are played first.
+The host can choose 5, 8 or 12 rounds and set an optional 45 or 90 second timer. **Everyone** in the lobby can add custom prompts (inside jokes work well, up to 20 each). They stay secret until they come up, are played first in word rounds with credit ("Prompt from Ben"), and unused ones carry over to the next game.
 
 ## Run locally
 

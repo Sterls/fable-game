@@ -57,6 +57,12 @@ function hostRoom(name, resume) {
     for (const p of state.players) p.connected = p.id === myId;
     if (state.save === 'saving') state.save = 'error';
     state.settings.modes ||= { words: true, sketch: true, pick: true, rather: true }; // rooms saved by older versions
+    state.prompts ||= {};
+    if (state.settings.custom) {
+      const old = state.settings.custom.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 20);
+      state.prompts[state.hostId] = (state.prompts[state.hostId] || []).concat(old).slice(0, 20);
+      state.settings.custom = '';
+    }
     state.art ||= {};
     state.gallery ||= [];
   } else {
@@ -226,6 +232,7 @@ function receive(v) {
     }
   }
   if (v.phase === 'lobby' || (v.round === 1 && (!prev || prev.round !== 1))) { ui.arts = {}; ui.recapOpen = new Set(); }
+  if (v.phase === 'answer' && v.round === 1 && (!prev || prev.phase === 'lobby')) ui.showCustom = false;
   ui.deadlineAt = v.remaining ? Date.now() + v.remaining : 0;
   S.view = v;
   render();
@@ -302,6 +309,7 @@ function homeScreen() {
       <li>When everyone's in, answers are revealed. You score <b>1 point for each other player</b> who wrote the same thing.</li>
       <li>The host can merge answers that mean the same thing (“NYC” and “New York”), so feel free to argue your case.</li>
       <li><b>Spotlight rounds:</b> try to match one chosen player. Matching them is worth 2 points, and they get 1 for each person who matched.</li>
+      <li><b>Custom prompts:</b> anyone in the lobby can add their own. They stay secret until they come up.</li>
       <li><b>Sketch rounds:</b> draw your answer and add a hidden label. Everyone sees the drawings first, then the labels are revealed and scored.</li>
       <li><b>Quick pick:</b> tap one of four options. Pick what you think most people will pick.</li>
       <li><b>Would you rather:</b> a spicy dilemma. Everyone on the majority side scores 2.</li>
@@ -328,6 +336,7 @@ function lobbyScreen(v) {
     <ul class="plist">${players}</ul>
     ${v.players.length < 2 ? '<p class="muted small">Waiting for friends to join…</p>' : ''}
   </section>
+  ${promptsCard(v)}
   <section class="card stack">
     <h2>Settings</h2>
     <div class="setting"><span>Rounds</span>${seg('rounds', [5, 8, 12], v.settings.rounds, (o) => o)}</div>
@@ -340,14 +349,27 @@ function lobbyScreen(v) {
         }).join('')}
       </div>
     </div>
-    ${host ? `
-      <button class="link" id="b-custom">${ui.showCustom ? 'Hide' : 'Add'} your own prompts ${v.settings.customCount ? `(${v.settings.customCount})` : ''}</button>
-      ${ui.showCustom ? `<textarea id="custom" data-keep rows="5" placeholder="One per line, e.g.&#10;A place we've all been together&#10;Something Jamie always says"></textarea>
-      <p class="muted small">Your prompts are played first.</p>` : ''}
-      <button class="primary" id="b-start" ${enough ? '' : 'disabled'}>${enough ? 'Start game' : 'Need at least 2 players'}</button>`
-    : `<p class="muted center small">The host will start the game when everyone's here.${v.settings.customCount ? ` ${v.settings.customCount} custom prompt(s) added.` : ''}</p>`}
+    ${host
+      ? `<button class="primary" id="b-start" ${enough ? '' : 'disabled'}>${enough ? 'Start game' : 'Need at least 2 players'}</button>`
+      : '<p class="muted center small">The host will start the game when everyone’s here.</p>'}
   </section>
   ${crewSection(v)}`;
+}
+
+function promptsCard(v) {
+  const mine = (v.myPrompts || '').split('\n').filter(Boolean).length;
+  const counts = (v.promptCounts || []).filter((c) => player(c.id));
+  const total = counts.reduce((n, c) => n + c.n, 0);
+  const wordsOff = !(v.settings.modes || {}).words;
+  return `<section class="card stack">
+    <h2>Custom prompts${total ? ` <span class="muted">${total}</span>` : ''}</h2>
+    <p class="muted small" style="margin:-6px 0 0">Everyone can add prompts. They’re kept secret until they come up, and they’re played first in word rounds.</p>
+    ${counts.length ? `<p class="small" style="margin:0">${counts.map((c) => `${esc(pname(c.id))} <b>${c.n}</b>`).join(' · ')}</p>` : ''}
+    <button class="ghost" id="b-custom" aria-expanded="${ui.showCustom}">${ui.showCustom ? 'Done' : mine ? `Edit your prompts (${mine})` : 'Add your own prompts'}</button>
+    ${ui.showCustom ? `<textarea id="custom" data-keep rows="5" maxlength="1800" placeholder="One per line, e.g.&#10;A place we've all been together&#10;Something Jamie always says"></textarea>
+    <p class="muted small" style="margin:0">Up to 20, one per line. They save as you type.</p>` : ''}
+    ${wordsOff && total ? '<p class="notice small" style="margin:0">Word rounds are off, so custom prompts won’t come up.</p>' : ''}
+  </section>`;
 }
 
 function crewSection(v) {
@@ -422,7 +444,7 @@ function recapCard(v) {
       <details data-recap="${h.round}" ${open ? 'open' : ''}>
         <summary>
           <span class="rc-head muted small">Round ${h.round}${info.label ? ` · ${info.label}` : ''}${h.type === 'spotlight' ? ` · Spotlight on ${esc(name(h.spotlight))}` : ''}${myPts ? ` · <b class="pts">you +${myPts}</b>` : ''}</span>
-          <span class="rc-prompt">${esc(h.prompt)}</span>
+          <span class="rc-prompt">${esc(h.prompt)}${h.by ? ` <span class="muted small rc-by">from ${esc(name(h.by))}</span>` : ''}</span>
           ${h.mode === 'rather' && h.options
             ? (open ? '' : `<span class="rc-digest small">${h.options.map((o) => {
                 const g = h.groups.find((x) => x.label === o);
@@ -470,7 +492,8 @@ function roundHeader(v) {
         ? '<b>You’re in the spotlight.</b> Everyone is trying to match you, so give your most natural answer.'
         : `<b>Spotlight on ${esc(pname(v.spotlight))}.</b> Match their answer for 2 points.`}
     </div>` : ''}
-  <h1 class="prompt">${esc(v.prompt)}</h1>`;
+  <h1 class="prompt">${esc(v.prompt)}</h1>
+  ${v.promptBy ? `<p class="by muted small">Prompt from ${esc(pname(v.promptBy))}</p>` : ''}`;
 }
 
 function answerInput(v) {
@@ -610,7 +633,22 @@ function finalScreen(v) {
 
 /* ---------------- render ---------------- */
 
+// Removing a focused field fires blur/change, which can save and re-render while we're
+// still patching the page. Defer any such nested render until this one has finished.
+let rendering = false;
+let renderAgain = false;
 function render() {
+  if (rendering) { renderAgain = true; return; }
+  rendering = true;
+  try {
+    renderNow();
+  } finally {
+    rendering = false;
+  }
+  if (renderAgain) { renderAgain = false; render(); }
+}
+
+function renderNow() {
   const v = S.view;
   let html;
   if (ui.board) html = boardScreen(ui.board);
@@ -641,7 +679,7 @@ function render() {
     const prev = [...screen.children];
     next.forEach((n, i) => {
       const o = prev[i];
-      if (!o) screen.append(n);
+      if (!o || o.parentNode !== screen) screen.append(n);
       // Canvases gain width/height once painted; ignore that so a drawing isn't torn down mid-stroke.
       else if (o.outerHTML.replace(/ (width|height)="\d+"/g, '') !== n.outerHTML) o.replaceWith(n);
     });
@@ -649,7 +687,7 @@ function render() {
   }
 
   // Fill fresh inputs: keep what was typed, otherwise use initial values.
-  const initial = { answer: ui.draft, custom: v && v.custom ? v.custom : '' };
+  const initial = { answer: ui.draft, custom: v && v.myPrompts ? v.myPrompts : '' };
   document.querySelectorAll('[data-keep]').forEach((el) => {
     if (el._ready) return;
     el._ready = true;
@@ -759,12 +797,12 @@ document.addEventListener('input', (e) => {
 
 let customTimer;
 document.addEventListener('change', (e) => {
-  if (e.target.id === 'custom') act({ t: 'settings', custom: e.target.value });
+  if (e.target.id === 'custom') act({ t: 'prompts', text: e.target.value });
 });
 document.addEventListener('input', (e) => {
   if (e.target.id !== 'custom') return;
   clearTimeout(customTimer);
-  customTimer = setTimeout(() => act({ t: 'settings', custom: e.target.value }), 600);
+  customTimer = setTimeout(() => act({ t: 'prompts', text: e.target.value }), 600);
 });
 
 // Recap rounds: remember which are expanded so re-renders keep them open.
