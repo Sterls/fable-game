@@ -55,5 +55,5 @@ The site is a full PWA: it has a manifest, a service worker, and 192px, 512px an
 | `js/game.js` | Game rules: rounds, scoring, merging, and what each player can see |
 | `js/net.js` | Transport: PeerJS, plus BroadcastChannel for `?local=1` testing |
 | `js/app.js` | UI and session handling |
-| `js/prompts.js` | Built-in prompts (~190) |
+| `js/prompts.js` | Built-in prompts (~160) |
 | `vendor/peerjs.min.js` | PeerJS 1.5.4 (MIT), vendored so the app works offline and inside app wrappers |
