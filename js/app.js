@@ -54,12 +54,14 @@ function hostRoom(name, resume) {
       if (msg.t === 'hello') {
         const pid = String(msg.id || '').slice(0, 20);
         if (!pid || pid === myId) return;
-        S.conns.set(connId, pid);
-        if (!reduce(S.state, pid, { t: 'join', name: msg.name })) {
-          S.net.send(connId, { t: 'full' });
-          S.conns.delete(connId);
-          return;
+        const r = reduce(S.state, pid, { t: 'join', name: msg.name, takeover: !!msg.takeover });
+        if (!r) return S.net.send(connId, { t: 'full' });
+        if (r.taken) return S.net.send(connId, { t: 'taken', name: cleanName(msg.name) });
+        if (r.replaced) {
+          // Their old device is still attached: send it home.
+          for (const [c, p] of S.conns) if (p === r.replaced) { S.net.send(c, { t: 'replaced' }); S.conns.delete(c); }
         }
+        S.conns.set(connId, pid);
         return sync();
       }
       const pid = S.conns.get(connId);
@@ -134,12 +136,19 @@ function joinRoom(code, name, isRetry) {
     onOpen() {
       S.status = 'ok';
       S.lostAt = 0;
-      net.send({ t: 'hello', id: myId, name });
+      if (!net.wantsHelloFirst) net.send({ t: 'hello', id: myId, name });
+      render();
     },
     onMessage(msg) {
       if (msg.t === 'view') receive(msg.v);
       else if (msg.t === 'full') leave(`That room is full (${MAX_PLAYERS} players max).`);
       else if (msg.t === 'kicked') leave('The host removed you from the room.');
+      else if (msg.t === 'replaced') leave('You rejoined this room from another device or browser.');
+      else if (msg.t === 'taken') {
+        const yes = confirm(`Someone named ${msg.name} is already in this room.\n\nIs that you on another device or browser? Choose OK to continue as ${msg.name} (your score comes with you), or Cancel to pick a different name.`);
+        if (yes) net.send({ t: 'hello', id: myId, name, takeover: true });
+        else leave(`Someone named ${msg.name} is already in this room. Pick a different name.`);
+      }
     },
     onClose() { if (S.net === net) retry(); },
     onError(err) {
@@ -149,6 +158,7 @@ function joinRoom(code, name, isRetry) {
     },
   });
   S.net = net;
+  if (net.wantsHelloFirst) net.send({ t: 'hello', id: myId, name });
   function retry() {
     if (Date.now() - since > 90000) return leave('Lost connection to the room.');
     S.status = 'reconnecting';

@@ -1,101 +1,142 @@
 // Transport layer. The host is authoritative; clients send actions and receive state.
 // Two implementations share one interface:
-//   PeerTransport  - WebRTC via PeerJS (works across devices, static hosting friendly)
-//   LocalTransport - BroadcastChannel (same browser, multiple tabs; for testing: add ?local=1)
+//   Realtime - Supabase Realtime broadcast channels. Every device makes an ordinary
+//              outbound WebSocket to Supabase, so it works on any Wi-Fi or cellular network.
+//   Local    - BroadcastChannel (same browser, multiple tabs; for testing: add ?local=1)
 //
 // Host API:   createHost(code, { onOpen, onMessage(connId, msg), onLeave(connId), onError })
-//             -> { send(connId, msg), broadcast(msg), close() }
+//             -> { send(connId, msg), close() }
 // Client API: createClient(code, { onOpen, onMessage(msg), onClose, onError })
 //             -> { send(msg), close() }
+import { SUPABASE_URL, SUPABASE_KEY } from './config.js';
 
-const PREFIX = 'commonground-v1-';
+const PREFIX = 'commonground-v2-';
 
 export function useLocal() {
   return new URLSearchParams(location.search).has('local');
 }
 
-/* ---------------- PeerJS ---------------- */
+const rid = () => 'c' + Math.random().toString(36).slice(2, 12);
 
-function peerHost(code, h) {
-  const conns = new Map();
-  let closed = false;
-  let attempts = 0;
-  let peer;
+/* ---------------- Supabase Realtime ---------------- */
 
-  function start() {
-    peer = new window.Peer(PREFIX + code, { debug: 0 });
-    peer.on('open', () => { attempts = 0; h.onOpen && h.onOpen(); });
-    peer.on('connection', (conn) => {
-      conn.on('open', () => conns.set(conn.connectionId, conn));
-      conn.on('data', (msg) => h.onMessage(conn.connectionId, msg));
-      const drop = () => {
-        if (conns.delete(conn.connectionId)) h.onLeave(conn.connectionId);
-      };
-      conn.on('close', drop);
-      conn.on('error', drop);
-    });
-    peer.on('disconnected', () => {
-      // Lost the signaling server only; existing player connections keep working.
-      if (!closed) setTimeout(() => { if (!closed && !peer.destroyed) peer.reconnect(); }, 1500);
-    });
-    peer.on('error', (err) => {
-      if (err.type === 'unavailable-id' && attempts < 8) {
-        // Usually our own previous session (page reload) that the server hasn't expired yet.
-        attempts++;
-        peer.destroy();
-        setTimeout(() => !closed && start(), 2500);
-        h.onError && h.onError({ type: 'retrying', message: 'Reclaiming room…' });
-        return;
-      }
-      if (err.type === 'peer-unavailable') return;
-      h.onError && h.onError(err);
+let sbClient = null;
+function sb() {
+  if (!sbClient) {
+    sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      realtime: { params: { eventsPerSecond: 20 } },
     });
   }
-  start();
+  return sbClient;
+}
+
+function rtChannel(code, presenceKey) {
+  return sb().channel(PREFIX + code, {
+    config: { broadcast: { self: false, ack: false }, presence: { key: presenceKey } },
+  });
+}
+
+function rtHost(code, h) {
+  const ch = rtChannel(code, 'host');
+  const conns = new Set();
+  let closed = false;
+  const out = (payload) => ch.send({ type: 'broadcast', event: 'h2c', payload });
+
+  ch.on('broadcast', { event: 'c2h' }, ({ payload }) => {
+    if (closed || !payload || typeof payload.from !== 'string') return;
+    const { from, type } = payload;
+    if (type === 'hello') {
+      conns.add(from);
+      out({ to: from, type: 'welcome' });
+      h.onMessage(from, payload.msg);
+      return;
+    }
+    if (type === 'bye') {
+      if (conns.delete(from)) h.onLeave(from);
+      return;
+    }
+    if (conns.has(from)) h.onMessage(from, payload.msg);
+  });
+  ch.on('presence', { event: 'leave' }, ({ key }) => {
+    if (!closed && conns.delete(key)) h.onLeave(key);
+  });
+  ch.subscribe((status) => {
+    if (closed) return;
+    if (status === 'SUBSCRIBED') {
+      ch.track({ role: 'host' });
+      // Tell anyone already in the channel (e.g. after a host reload) to say hello again.
+      out({ to: '*', type: 'host-up' });
+      h.onOpen && h.onOpen();
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+      h.onError && h.onError({ type: 'retrying', message: 'Reconnecting…' });
+    }
+  });
 
   return {
-    send(id, msg) {
-      const c = conns.get(id);
-      if (c && c.open) c.send(msg);
-    },
-    broadcast(msg) {
-      for (const c of conns.values()) if (c.open) c.send(msg);
-    },
-    close() {
-      closed = true;
-      peer && peer.destroy();
-    },
+    send(id, msg) { if (!closed) out({ to: id, type: 'msg', msg }); },
+    close() { closed = true; sb().removeChannel(ch); },
   };
 }
 
-function peerClient(code, h) {
-  let closed = false;
-  const peer = new window.Peer({ debug: 0 });
-  let conn = null;
+function rtClient(code, h) {
+  const me = rid();
+  const ch = rtChannel(code, me);
   let opened = false;
-  peer.on('open', () => {
-    conn = peer.connect(PREFIX + code, { reliable: true });
-    const timer = setTimeout(() => {
-      if (!opened) h.onError && h.onError({ type: 'timeout', message: 'Could not reach that room.' });
-    }, 12000);
-    conn.on('open', () => { opened = true; clearTimeout(timer); h.onOpen && h.onOpen(); });
-    conn.on('data', (msg) => h.onMessage(msg));
-    conn.on('close', () => { if (!closed) h.onClose && h.onClose(); });
-    conn.on('error', () => { if (!closed) h.onClose && h.onClose(); });
+  let closed = false;
+  let hello = null;
+  let helloTimer = null;
+  const out = (type, msg) => ch.send({ type: 'broadcast', event: 'c2h', payload: { from: me, type, msg } });
+  const giveUp = setTimeout(() => {
+    if (!opened && !closed) h.onError && h.onError({ type: 'no-room', message: `Couldn’t find room ${code}. Check the code, and make sure the host still has the game open.` });
+  }, 10000);
+
+  ch.on('broadcast', { event: 'h2c' }, ({ payload }) => {
+    if (closed || !payload) return;
+    if (payload.type === 'host-up') { if (hello) out('hello', hello); return; }
+    if (payload.to !== me) return;
+    if (payload.type === 'welcome') {
+      if (!opened) { opened = true; clearTimeout(giveUp); clearInterval(helloTimer); h.onOpen && h.onOpen(); }
+      return;
+    }
+    if (payload.type === 'msg') h.onMessage(payload.msg);
   });
-  peer.on('error', (err) => {
+  ch.on('presence', { event: 'leave' }, ({ key }) => {
+    // Host's connection dropped. The app retries until the host is back.
+    if (key === 'host' && opened && !closed && !(ch.presenceState().host || []).length) h.onClose && h.onClose();
+  });
+  ch.subscribe((status) => {
     if (closed) return;
-    if (err.type === 'peer-unavailable') {
-      h.onError && h.onError({ type: 'no-room', message: 'No room with that code is open.' });
-    } else if (opened) {
-      h.onClose && h.onClose();
-    } else {
-      h.onError && h.onError(err);
+    if (status === 'SUBSCRIBED') {
+      ch.track({ role: 'player' });
+      if (hello) out('hello', hello);
+    } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+      if (opened) h.onClose && h.onClose();
     }
   });
+
   return {
-    send(msg) { if (conn && conn.open) conn.send(msg); },
-    close() { closed = true; peer.destroy(); },
+    // The first message is the app's hello; resend it until the host welcomes us.
+    send(msg) {
+      if (closed) return;
+      if (!hello && msg && msg.t === 'hello') {
+        hello = msg;
+        out('hello', hello);
+        helloTimer = setInterval(() => !opened && out('hello', hello), 2500);
+        return;
+      }
+      out('msg', msg);
+    },
+    close() {
+      if (closed) return;
+      try { out('bye'); } catch {}
+      closed = true;
+      clearTimeout(giveUp);
+      clearInterval(helloTimer);
+      setTimeout(() => sb().removeChannel(ch), 100);
+    },
+    // The app sends hello from onOpen; Realtime needs it before we're "open", so we open early.
+    wantsHelloFirst: true,
   };
 }
 
@@ -103,7 +144,7 @@ function peerClient(code, h) {
 
 function localHost(code, h) {
   const ch = new BroadcastChannel(PREFIX + code);
-  const seen = new Map(); // connId -> last heard
+  const seen = new Map();
   ch.onmessage = ({ data }) => {
     if (data.to !== 'host') return;
     if (data.type === 'bye') { if (seen.delete(data.from)) h.onLeave(data.from); return; }
@@ -118,13 +159,12 @@ function localHost(code, h) {
   setTimeout(() => h.onOpen && h.onOpen(), 0);
   return {
     send(id, msg) { ch.postMessage({ to: id, type: 'msg', msg }); },
-    broadcast(msg) { for (const id of seen.keys()) ch.postMessage({ to: id, type: 'msg', msg }); },
     close() { ch.close(); },
   };
 }
 
 function localClient(code, h) {
-  const me = 'c' + Math.random().toString(36).slice(2, 10);
+  const me = rid();
   const ch = new BroadcastChannel(PREFIX + code);
   let opened = false;
   ch.onmessage = ({ data }) => {
@@ -145,9 +185,9 @@ function localClient(code, h) {
 }
 
 export function createHost(code, handlers) {
-  return useLocal() ? localHost(code, handlers) : peerHost(code, handlers);
+  return useLocal() ? localHost(code, handlers) : rtHost(code, handlers);
 }
 
 export function createClient(code, handlers) {
-  return useLocal() ? localClient(code, handlers) : peerClient(code, handlers);
+  return useLocal() ? localClient(code, handlers) : rtClient(code, handlers);
 }

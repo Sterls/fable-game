@@ -33,8 +33,22 @@ export function newGame(code, hostId, hostName) {
   return s;
 }
 
-function addPlayer(s, id, name) {
-  name = uniqueName(s, id, cleanName(name) || 'Player');
+// Returns true (joined), false (room full) or { taken: oldId } when the name belongs to someone
+// who still looks connected; the joiner can confirm it's them and retry with takeover.
+function addPlayer(s, id, name, takeover) {
+  name = cleanName(name) || 'Player';
+  // Same name as an existing seat = probably the same person on another device or browser.
+  if (!s.players.some((p) => p.id === id)) {
+    const seat = s.players.find((p) => p.name.toLowerCase() === name.toLowerCase());
+    if (seat && seat.id !== s.hostId) {
+      if (seat.connected && !takeover) return { taken: seat.id };
+      const old = seat.id;
+      rekey(s, old, id);
+      s.players.find((p) => p.id === id).connected = true;
+      return { replaced: old };
+    }
+  }
+  name = uniqueName(s, id, name);
   const existing = s.players.find((p) => p.id === id);
   if (existing) {
     existing.name = name;
@@ -46,6 +60,23 @@ function addPlayer(s, id, name) {
   const color = COLORS.find((c) => !used.has(c)) || COLORS[s.players.length % COLORS.length];
   s.players.push({ id, name, score: 0, connected: true, color, spot: 0 });
   return true;
+}
+
+function rekey(s, from, to) {
+  const move = (obj) => { if (obj && from in obj) { obj[to] = obj[from]; delete obj[from]; } };
+  s.players.find((p) => p.id === from).id = to;
+  move(s.answers);
+  move(s.points);
+  move(s.stats);
+  for (const g of s.groups) g.members = g.members.map((m) => (m === from ? to : m));
+  if (s.spotlight === from) s.spotlight = to;
+  for (const k of Object.keys(s.sync)) {
+    const ids = k.split('|');
+    if (!ids.includes(from)) continue;
+    const nk = ids.map((x) => (x === from ? to : x)).sort().join('|');
+    s.sync[nk] = (s.sync[nk] || 0) + s.sync[k];
+    delete s.sync[k];
+  }
 }
 
 // Names identify people on the crew leaderboard, so two players can't share one.
@@ -241,7 +272,7 @@ export function reduce(s, from, a) {
   const me = s.players.find((p) => p.id === from);
   switch (a.t) {
     case 'join':
-      return addPlayer(s, from, a.name);
+      return addPlayer(s, from, a.name, a.takeover);
     case 'leave':
       if (!me) return false;
       if (s.phase === 'lobby') s.players = s.players.filter((p) => p.id !== from);

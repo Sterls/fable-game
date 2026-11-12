@@ -5,7 +5,7 @@ A calm party game for a group of friends. Everyone answers the same prompt in se
 - **Turn-based, so ping doesn't matter.** Nothing is time-critical. The round timer is off by default.
 - **Low-key visuals.** Soft colors, no sound, no flashing. Dark mode follows the device setting, and the app honors reduced-motion settings.
 - **Every player uses their own device.** Phones, tablets, and computers can all play together. Up to 12 players.
-- **No server to run.** The site is plain static files. Players connect peer-to-peer (WebRTC via [PeerJS](https://peerjs.com)).
+- **No server to run.** The site is plain static files. Game messages are relayed through Supabase Realtime, so it works on any Wi-Fi or cellular network.
 
 ## How a game goes
 
@@ -41,12 +41,14 @@ The site is a full PWA: it has a manifest, a service worker, and 192px, 512px an
 ## How networking works
 
 - The host's browser holds the game state and is the authority. Other players send actions to the host and get back their own view of the state. During a round, no one sees anyone else's answers.
-- Connections use the free public PeerJS server for the initial handshake. Gameplay data then goes directly between devices, with PeerJS's TURN relay as a fallback.
+- Each room is a Supabase Realtime broadcast channel (`commonground-v2-<CODE>`). Every device makes an ordinary outbound WebSocket to Supabase, so home routers, carrier networks and firewalls don't get in the way. (An earlier version used direct peer-to-peer WebRTC, which failed between phones on different networks.)
+- Realtime needs no database tables and no extra setup beyond the publishable key in `js/config.js`. The free tier allows 200 simultaneous connections and 2 million messages a month. A game uses a few hundred messages.
 - **Reconnecting:**
   - A player whose phone sleeps reconnects automatically and keeps their score.
-  - A host who reloads the page can tap **Resume hosting room XXXX**.
-- **Keeping the host alive:** the host's device must stay on the game. If the host closes it, the room ends. On phones, the host should keep the screen awake.
-- **If you outgrow PeerJS:** if some networks (strict corporate or school Wi-Fi) block peer-to-peer connections, or you want rooms to survive the host leaving, `js/net.js` is the only file to change. A Cloudflare Worker with a Durable Object would make a good drop-in relay, since it fits the same small host/client interface.
+  - Joining again with the same name from another device or browser offers to take over your old spot, score included.
+  - A host who reloads the page can tap **Resume hosting room XXXX**, and players reattach on their own.
+- **Keeping the host alive:** the host's device holds the game. If the host closes it, the room ends, though the host can resume within a few hours. On phones, the host should keep the screen awake.
+- **Privacy:** messages aren't encrypted end to end between players. Someone using browser developer tools could see other players' answers before the reveal. That's fine for friends, but don't use it for anything secret.
 
 ## Crew stats & leaderboard (Supabase)
 
@@ -80,10 +82,10 @@ A **crew** is a friend group with a permanent, shared leaderboard. The host link
 | File | Purpose |
 | --- | --- |
 | `js/game.js` | Game rules: rounds, scoring, merging, and what each player can see |
-| `js/net.js` | Transport: PeerJS, plus BroadcastChannel for `?local=1` testing |
+| `js/net.js` | Transport: Supabase Realtime, plus BroadcastChannel for `?local=1` testing |
 | `js/app.js` | UI and session handling |
 | `js/prompts.js` | Built-in prompts (~160) |
 | `js/crew.js`, `js/config.js` | Supabase client and project settings |
 | `js/board.js` | Crew leaderboard screen |
 | `supabase/schema.sql` | Database tables and functions (paste into the Supabase SQL editor) |
-| `vendor/peerjs.min.js` | PeerJS 1.5.4 (MIT), vendored so the app works offline and inside app wrappers |
+| `vendor/supabase.js` | supabase-js 2.45.4 (MIT), vendored so the app works inside app wrappers |
