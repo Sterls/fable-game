@@ -222,3 +222,22 @@ button:focus-visible, [data-group]:focus-visible { outline: 2px solid var(--acce
 .gallery { list-style: none; padding: 0; margin: 12px 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
 .mem-art { flex-direction: column; align-items: flex-start; gap: 4px; }
 .mem-art > span { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* ---------- end-of-game recap ---------- */
+.recap { list-style: none; padding: 0; margin: 0; }
+.recap > li { border-top: 1px solid var(--line); }
+.recap > li:first-child { border-top: none; }
+.recap details { padding: 10px 0; }
+.recap summary { list-style: none; cursor: pointer; display: flex; flex-direction: column; gap: 2px; position: relative; padding-right: 22px; }
+.recap summary::-webkit-details-marker { display: none; }
+.recap summary::after { content: "+"; position: absolute; right: 2px; top: 0; color: var(--muted); font-weight: 600; }
+.recap details[open] summary::after { content: "−"; }
+.recap summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.rc-prompt { font-weight: 650; font-size: 17px; }
+.rc-digest { color: var(--ink); opacity: 0.8; }
+.rc-groups { list-style: none; padding: 0; margin: 10px 0 0; display: flex; flex-direction: column; gap: 8px; }
+.rc-groups > li { border-radius: 12px; padding: 8px 10px; background: var(--bg); }
+.rc-groups > li.match { background: var(--match); }
+.rc-label { font-weight: 650; }
+.rc-groups .gmem { margin-top: 4px; font-size: 14px; }
+.rc-groups .art-thumb { width: 64px; }

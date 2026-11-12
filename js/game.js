@@ -26,6 +26,8 @@ export function newGame(code, hostId, hostName) {
     art: {},
     unveiled: true,
     gallery: [],
+    history: [], // one entry per finished round, for the end-of-game recap
+    historyArt: {}, // round -> { pid: drawing }
     type: 'crowd',
     spotlight: null,
     answers: {},
@@ -79,6 +81,9 @@ function rekey(s, from, to) {
   s.players.find((p) => p.id === from).id = to;
   move(s.answers);
   move(s.art);
+  for (const h of s.history || []) for (const g of h.groups) for (const m of g.members) if (m.id === from) m.id = to;
+  for (const r of Object.values(s.historyArt || {})) move(r);
+  if (s.history) for (const h of s.history) if (h.spotlight === from) h.spotlight = to;
   s.gallery = (s.gallery || []).map((m) => (m === from ? to : m));
   move(s.points);
   move(s.stats);
@@ -261,6 +266,19 @@ export function score(s) {
 
 function bank(s) {
   s.played += 1;
+  (s.history ||= []).push({
+    round: s.round,
+    mode: s.mode,
+    prompt: s.prompt,
+    options: s.options,
+    type: s.type,
+    spotlight: s.spotlight,
+    groups: s.groups.map((g) => ({
+      label: g.label,
+      members: g.members.map((id) => ({ id, text: s.answers[id], pts: s.points[id] || 0 })),
+    })),
+  });
+  if (s.mode === 'sketch') (s.historyArt ||= {})[s.round] = { ...s.art };
   const spotG = s.type === 'spotlight' && s.groups.find((g) => g.members.includes(s.spotlight));
   for (const p of s.players) {
     p.score += s.points[p.id] || 0;
@@ -303,6 +321,8 @@ function resetToLobby(s) {
   s.options = null;
   s.mode = 'words';
   s.unveiled = true;
+  s.history = [];
+  s.historyArt = {};
   s.sync = {};
   s.answers = {};
   s.groups = [];
@@ -486,6 +506,12 @@ export function artFor(s) {
   return { round: s.round, art: { ...s.art } };
 }
 
+// Drawings from every sketch round, for the end-of-game recap (one message per round).
+export function recapArt(s) {
+  if (s.phase !== 'final') return [];
+  return Object.entries(s.historyArt || {}).map(([round, art]) => ({ round: Number(round), art }));
+}
+
 // What a given player is allowed to see.
 export function viewFor(s, pid) {
   const v = {
@@ -527,6 +553,7 @@ export function viewFor(s, pid) {
     for (const [k, n] of Object.entries(s.sync)) if (!best || n > best.n) best = { ids: k.split('|'), n };
     v.best = best;
     v.mystats = s.stats[pid] || null;
+    v.history = s.history || [];
   }
   return v;
 }

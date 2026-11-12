@@ -1,5 +1,5 @@
 import { createHost, createClient, useLocal } from './net.js';
-import { newGame, reduce, viewFor, tick, setConnected, cleanName, results, artFor, MAX_PLAYERS } from './game.js';
+import { newGame, reduce, viewFor, tick, setConnected, cleanName, results, artFor, recapArt, MAX_PLAYERS } from './game.js';
 import { PALETTE, encode, attachPad, paint, paintAll } from './sketch.js';
 import { crewEnabled, createCrew, checkCrew, submitGame, getLeaderboard, cleanSlug } from './crew.js';
 import { boardScreen } from './board.js';
@@ -30,14 +30,18 @@ const ui = {
   crewForm: null, crewBusy: false, crewErr: '',
   board: null, // { slug, data, loading, err, sort, open }
   pad: { strokes: [], color: 0, width: 0 }, // my drawing for the current sketch round
-  art: null, // { round, art: { pid: data } } received from the host after a sketch reveal
+  arts: {}, // round -> { pid: drawing }, received from the host after each sketch reveal
+  recapOpen: new Set(), // rounds expanded in the end-of-game recap
 };
 
-function getArt(pid) {
-  if (pid === myId && ui.pad.strokes.length && S.view && S.view.phase === 'answer') return encode(ui.pad.strokes);
-  if (S.role === 'host' && S.state) return S.state.art[pid] || '';
-  if (ui.art && S.view && ui.art.round === S.view.round) return ui.art.art[pid] || '';
-  return '';
+// key is a player id (current round) or "r<round>:<player id>" (recap).
+function getArt(key) {
+  const m = /^r(\d+):(.+)$/.exec(key);
+  const round = m ? Number(m[1]) : S.view && S.view.round;
+  const pid = m ? m[2] : key;
+  if (!m && pid === myId && ui.pad.strokes.length && S.view && S.view.phase === 'answer') return encode(ui.pad.strokes);
+  if (S.role === 'host' && S.state) return (m ? (S.state.historyArt || {})[round] || {} : S.state.art)[pid] || '';
+  return (ui.arts[round] || {})[pid] || '';
 }
 
 const ALPHA = 'BCDFGHJKLMNPQRSTVWXZ';
@@ -78,6 +82,7 @@ function hostRoom(name, resume) {
         sync();
         const art = artFor(S.state);
         if (art) S.net.send(connId, { t: 'art', ...art });
+        for (const a of recapArt(S.state)) S.net.send(connId, { t: 'art', ...a }); // late/reloaded players at the end
         return;
       }
       const pid = S.conns.get(connId);
@@ -165,7 +170,7 @@ function joinRoom(code, name, isRetry) {
     },
     onMessage(msg) {
       if (msg.t === 'view') receive(msg.v);
-      else if (msg.t === 'art') { ui.art = { round: msg.round, art: msg.art || {} }; render(); }
+      else if (msg.t === 'art') { ui.arts[msg.round] = msg.art || {}; render(); }
       else if (msg.t === 'full') leave(`That room is full (${MAX_PLAYERS} players max).`);
       else if (msg.t === 'kicked') leave('The host removed you from the room.');
       else if (msg.t === 'replaced') leave('You rejoined this room from another device or browser.');
@@ -220,6 +225,7 @@ function receive(v) {
       ui.pad = { strokes: [], color: ui.pad.color, width: ui.pad.width };
     }
   }
+  if (v.phase === 'lobby' || (v.round === 1 && (!prev || prev.round !== 1))) { ui.arts = {}; ui.recapOpen = new Set(); }
   ui.deadlineAt = v.remaining ? Date.now() + v.remaining : 0;
   S.view = v;
   render();
@@ -390,6 +396,51 @@ function saveLine(v) {
     : '<p class="muted small">The results couldn’t be saved to the crew leaderboard.</p>';
 }
 
+function recapCard(v) {
+  const hist = v.history || [];
+  if (!hist.length) return '';
+  const name = (id) => (player(id) ? player(id).name : 'Someone');
+  const items = hist.map((h) => {
+    const info = MODE_INFO[h.mode] || MODE_INFO.words;
+    const filled = h.groups.filter((g) => g.members.length);
+    const digest = filled.slice(0, 3).map((g) => `${esc(g.label)}${g.members.length > 1 ? ` ×${g.members.length}` : ''}`).join(' · ') + (filled.length > 3 ? ' · …' : '');
+    const mine = h.groups.find((g) => g.members.some((m) => m.id === myId));
+    const myPts = mine ? mine.members.find((m) => m.id === myId).pts : 0;
+    const groups = h.groups.map((g) => `
+      <li class="${g.members.length > 1 ? 'match' : ''}">
+        <div class="rc-label">${esc(g.label)} <span class="muted">${g.members.length || 'nobody'}</span></div>
+        <div class="gmem">${g.members.map((m) => {
+          const p = player(m.id);
+          const art = h.mode === 'sketch' ? `<canvas class="art art-thumb" data-art="r${h.round}:${esc(m.id)}"></canvas>` : '';
+          const variant = m.text && m.text.trim().toLowerCase() !== g.label.trim().toLowerCase() ? ` <em>“${esc(m.text)}”</em>` : '';
+          return `<span class="mem ${art ? 'mem-art' : ''}">${art}<span>${p ? chip(p) : esc(name(m.id))}${variant}${m.pts ? ` <b class="pts">+${m.pts}</b>` : ''}</span></span>`;
+        }).join('')}</div>
+      </li>`).join('');
+    const open = ui.recapOpen.has(h.round);
+    return `
+    <li>
+      <details data-recap="${h.round}" ${open ? 'open' : ''}>
+        <summary>
+          <span class="rc-head muted small">Round ${h.round}${info.label ? ` · ${info.label}` : ''}${h.type === 'spotlight' ? ` · Spotlight on ${esc(name(h.spotlight))}` : ''}${myPts ? ` · <b class="pts">you +${myPts}</b>` : ''}</span>
+          <span class="rc-prompt">${esc(h.prompt)}</span>
+          ${h.mode === 'rather' && h.options
+            ? (open ? '' : `<span class="rc-digest small">${h.options.map((o) => {
+                const g = h.groups.find((x) => x.label === o);
+                return `${esc(o)} <b>(${g ? g.members.length : 0})</b>`;
+              }).join(' <i class="muted">or</i> ')}</span>`)
+            : open ? '' : `<span class="rc-digest small">${digest || '<span class="muted">No answers</span>'}</span>`}
+        </summary>
+        <ul class="rc-groups">${groups || '<li class="muted small">No answers this round.</li>'}</ul>
+      </details>
+    </li>`;
+  }).join('');
+  return `<section class="card">
+    <h2>Round by round</h2>
+    <p class="muted small" style="margin:-6px 0 8px">Tap a round to see everyone’s answers.</p>
+    <ol class="recap">${items}</ol>
+  </section>`;
+}
+
 function myStatsCard(v) {
   const st = v.mystats;
   if (!st || !st.answered) return '';
@@ -553,6 +604,7 @@ function finalScreen(v) {
   </section>
   ${scoreboard(v)}
   ${myStatsCard(v)}
+  ${recapCard(v)}
   ${isHost() ? '<button id="b-again" class="primary wide">Play again</button>' : '<p class="muted center small">Waiting for the host to start another game…</p>'}`;
 }
 
@@ -714,6 +766,17 @@ document.addEventListener('input', (e) => {
   clearTimeout(customTimer);
   customTimer = setTimeout(() => act({ t: 'settings', custom: e.target.value }), 600);
 });
+
+// Recap rounds: remember which are expanded so re-renders keep them open.
+document.addEventListener('toggle', (e) => {
+  const d = e.target;
+  if (!d.dataset || !d.dataset.recap) return;
+  const r = Number(d.dataset.recap);
+  if (d.open === ui.recapOpen.has(r)) return;
+  if (d.open) ui.recapOpen.add(r);
+  else ui.recapOpen.delete(r);
+  render();
+}, true);
 
 document.addEventListener('keydown', (e) => {
   if ((e.key === 'Enter' || e.key === ' ') && e.target.dataset && (e.target.dataset.group || e.target.dataset.lb)) {
