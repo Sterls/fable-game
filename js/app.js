@@ -56,7 +56,7 @@ function hostRoom(name, resume) {
   if (resume) {
     for (const p of state.players) p.connected = p.id === myId;
     if (state.save === 'saving') state.save = 'error';
-    state.settings.modes ||= { words: true, sketch: true, pick: true, rather: true }; // rooms saved by older versions
+    state.settings.modes ||= { words: true, sketch: true, pick: true, rather: true, vote: true }; // rooms saved by older versions
     state.prompts ||= {};
     if (state.settings.custom) {
       const old = state.settings.custom.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 20);
@@ -309,6 +309,7 @@ function homeScreen() {
       <li>When everyone's in, answers are revealed. You score <b>1 point for each other player</b> who wrote the same thing.</li>
       <li>The host can merge answers that mean the same thing (“NYC” and “New York”), so feel free to argue your case.</li>
       <li><b>Spotlight rounds:</b> try to match one chosen player. Matching them is worth 2 points, and they get 1 for each person who matched.</li>
+      <li><b>Best answer 🏆:</b> a funny prompt with no right answer. Everyone votes anonymously for their favorite response, and each vote is worth 1 point.</li>
       <li><b>Likes:</b> at the reveal, ♥ your favorite answer or drawing (one per round). The most liked gets +1.</li>
       <li><b>Custom prompts:</b> anyone in the lobby can add their own. They stay secret until they come up.</li>
       <li><b>Sketch rounds:</b> draw your answer and add a hidden label. Everyone sees the drawings first, then the labels are revealed and scored.</li>
@@ -345,7 +346,7 @@ function lobbyScreen(v) {
     <div class="setting"><span>Timer</span>${seg('timer', [0, 45, 90], v.settings.timer, (o) => (o ? o + 's' : 'Off'))}</div>
     <div class="setting setting-col"><span>Round types</span>
       <div class="chips" role="group" aria-label="Round types">
-        ${[['words', 'Words'], ['sketch', 'Sketch'], ['pick', 'Quick pick'], ['rather', 'Would you rather 🌶️']].map(([k, label]) => {
+        ${[['words', 'Words'], ['sketch', 'Sketch'], ['pick', 'Quick pick'], ['rather', 'Would you rather 🌶️'], ['vote', 'Best answer 🏆']].map(([k, label]) => {
           const on = (v.settings.modes || {})[k];
           return `<button class="tchip ${on ? 'on' : ''}" data-mode="${k}" aria-pressed="${!!on}" ${host ? '' : 'disabled'}>${label}</button>`;
         }).join('')}
@@ -427,12 +428,14 @@ function recapCard(v) {
   const items = hist.map((h) => {
     const info = MODE_INFO[h.mode] || MODE_INFO.words;
     const filled = h.groups.filter((g) => g.members.length);
-    const digest = filled.slice(0, 3).map((g) => `${esc(g.label)}${g.members.length > 1 ? ` ×${g.members.length}` : ''}`).join(' · ') + (filled.length > 3 ? ' · …' : '');
+    const digest = h.mode === 'vote'
+      ? (filled[0] ? `🏆 ${esc(filled[0].label)} <span class="muted">(${filled[0].members[0].pts || 0} vote${filled[0].members[0].pts === 1 ? '' : 's'}, ${esc(name(filled[0].members[0].id))})</span>` : '')
+      : filled.slice(0, 3).map((g) => `${esc(g.label)}${g.members.length > 1 ? ` ×${g.members.length}` : ''}`).join(' · ') + (filled.length > 3 ? ' · …' : '');
     const mine = h.groups.find((g) => g.members.some((m) => m.id === myId));
     const myPts = mine ? mine.members.find((m) => m.id === myId).pts : 0;
     const groups = h.groups.map((g) => `
       <li class="${g.members.length > 1 ? 'match' : ''}">
-        <div class="rc-label">${esc(g.label)} <span class="muted">${g.members.length || 'nobody'}</span></div>
+        <div class="rc-label">${esc(g.label)} <span class="muted">${h.mode === 'vote' ? `${g.members[0]?.pts || 0} vote${g.members[0]?.pts === 1 ? '' : 's'}` : g.members.length || 'nobody'}</span></div>
         <div class="gmem">${g.members.map((m) => {
           const p = player(m.id);
           const art = h.mode === 'sketch' ? `<canvas class="art art-thumb" data-art="r${h.round}:${esc(m.id)}"></canvas>` : '';
@@ -479,6 +482,7 @@ const MODE_INFO = {
   sketch: { label: 'Sketch round', how: 'Draw your answer, then give it a short label only the reveal will show.' },
   pick: { label: 'Quick pick', how: 'Tap the one you think most people will pick.' },
   rather: { label: 'Would you rather', how: 'Pick a side. Everyone on the majority side scores 2.' },
+  vote: { label: 'Best answer', how: 'No right answer here. Write something great; everyone votes anonymously for their favorite, and each vote is a point.' },
 };
 
 function roundHeader(v) {
@@ -533,13 +537,15 @@ function answerInput(v) {
       </form>
     </section>`;
   }
+  const vote = v.mode === 'vote';
   return `<section class="card">
+    ${vote ? `<p class="muted small" style="margin:0 0 12px">${MODE_INFO.vote.how}</p>` : ''}
     ${locked ? `
       <p class="muted small">Your answer</p>
       <p class="locked">${esc(v.mine)}</p>
       <button id="b-edit" class="ghost">Change answer</button>`
     : `<form id="f-answer" class="stack" autocomplete="off">
-      <input id="answer" data-keep maxlength="40" placeholder="Type your answer" enterkeyhint="done" autocapitalize="sentences">
+      <input id="answer" data-keep maxlength="${vote ? 90 : 40}" placeholder="${vote ? 'Your best answer' : 'Type your answer'}" enterkeyhint="done" autocapitalize="sentences">
       <button class="primary" type="submit">Lock it in</button>
     </form>`}
   </section>`;
@@ -580,7 +586,54 @@ function galleryScreen(v) {
   ${isHost() ? '<button id="b-unveil" class="primary wide">Show answers</button>' : '<p class="muted center small">Waiting for the host to show the answers…</p>'}`;
 }
 
+function voteScreen(v) {
+  const entries = v.ballot.map((e) => {
+    const mine = e.k === v.myEntry;
+    const on = e.k === v.myVote;
+    return `<li><button class="ballot ${on ? 'on' : ''} ${mine ? 'mine' : ''}" ${mine ? 'disabled' : `data-vote="${e.k}"`} aria-pressed="${on}">
+      <span class="ballot-text">${esc(e.text)}</span>
+      ${mine ? '<span class="ballot-tag">Yours</span>' : on ? '<span class="ballot-tag">Your vote ✓</span>' : ''}
+    </button></li>`;
+  }).join('');
+  const waiting = v.voters.filter((id) => !v.voted.includes(id)).map(player).filter(Boolean);
+  const canVote = v.voters.includes(myId);
+  return `
+  ${roundHeader(v)}
+  <p class="hint">${canVote ? (v.myVote >= 0 ? 'Vote counted. You can change it until the votes are revealed.' : 'Vote for your favorite. Answers are anonymous and you can’t vote for your own.') : 'Everyone else is voting…'}</p>
+  <ol class="ballots">${entries}</ol>
+  <section class="card">
+    <ul class="plist inline">${v.voters.map((id) => player(id)).filter(Boolean).map((p) => `<li>${chip(p, v.voted.includes(p.id) ? 'done' : '')}</li>`).join('')}</ul>
+    <p class="muted small">${waiting.length ? `Waiting for votes from ${waiting.map((p) => esc(p.name)).join(', ')}` : 'All votes are in.'}</p>
+    ${isHost() ? `<button id="b-tally" class="ghost" ${v.voted.length ? '' : 'disabled'}>Reveal votes now</button>` : ''}
+  </section>`;
+}
+
+function voteRevealScreen(v) {
+  const top = Math.max(0, ...v.groups.map((g) => v.points[g.members[0]?.id] || 0));
+  const items = v.groups.map((g) => {
+    const m = g.members[0];
+    if (!m) return '';
+    const p = player(m.id);
+    const n = v.points[m.id] || 0;
+    const best = top > 0 && n === top;
+    return `<li class="group ${best ? 'match spotg' : ''}">
+      <div class="gtop"><span class="glabel">${esc(g.label)}</span><span class="gcount">${best ? '🏆 ' : ''}${n} vote${n === 1 ? '' : 's'}</span></div>
+      <div class="gmem"><span class="mem"><span>${p ? chip(p) : 'Someone'}${n ? `<b class="pts">+${n}</b>` : ''}</span></span></div>
+    </li>`;
+  }).join('');
+  const final = v.round >= v.settings.rounds;
+  return `
+  ${roundHeader(v)}
+  <p class="hint">Each vote is worth 1 point.</p>
+  <ul class="groups">${items || '<li class="muted">No answers this round.</li>'}</ul>
+  ${scoreboard(v, v.points)}
+  ${isHost() ? `<button id="b-next" class="primary wide">${final ? 'See final scores' : 'Next round'}</button>
+            ${final ? '' : '<button id="b-end" class="link center-block">End game early</button>'}`
+    : '<p class="muted center small">The host will move on when everyone’s ready.</p>'}`;
+}
+
 function revealScreen(v) {
+  if (v.mode === 'vote') return voteRevealScreen(v);
   if (!v.unveiled) return galleryScreen(v);
   const host = isHost();
   const choice = v.mode === 'pick' || v.mode === 'rather';
@@ -671,7 +724,7 @@ function renderNow() {
   if (ui.board) html = boardScreen(ui.board);
   else if (!S.role) html = homeScreen();
   else if (!v) html = `<section class="card center"><p class="muted">${S.status === 'error' ? 'Having trouble connecting…' : 'Connecting…'}</p></section>`;
-  else html = { lobby: lobbyScreen, answer: answerScreen, reveal: revealScreen, final: finalScreen }[v.phase](v);
+  else html = { lobby: lobbyScreen, answer: answerScreen, vote: voteScreen, reveal: revealScreen, final: finalScreen }[v.phase](v);
   const key = ui.board ? 'board' : S.role ? (v ? v.phase + v.round : 'wait') : 'home';
 
   // Patch only the top-level blocks that changed, so a focused input (and the
@@ -913,6 +966,8 @@ document.addEventListener('click', async (e) => {
   if (id === 'b-end') { if (confirm('End the game now and show final scores?')) act({ t: 'end' }); return; }
   if (id === 'b-again') return act({ t: 'again' });
   if (id === 'b-unveil') return act({ t: 'unveil' });
+  if (t.dataset.vote != null && S.view?.phase === 'vote') return act({ t: 'vote', k: Number(t.dataset.vote) });
+  if (id === 'b-tally') return act({ t: 'tally' });
   if (t.dataset.like) { e.stopPropagation(); return act({ t: 'like', id: t.dataset.like }); }
 
   // Quick pick / would you rather: tapping an option is the answer.

@@ -19,6 +19,7 @@ A calm party game for a group of friends. Everyone answers the same prompt in se
    - **Sketch:** draw your answer and add a short hidden label. The reveal opens on an anonymous gallery, then the host shows who drew what; scoring uses the labels.
    - **Quick pick:** tap one of four options.
    - **Would you rather 🌶️:** a spicy (not explicit) two-way dilemma. Everyone on the majority side scores 2; a tie scores nothing.
+   - **Best answer 🏆:** a funny open prompt ("Things you don't want to hear your vet say"). Everyone writes a response, then votes anonymously for their favorite (not their own). Each vote is worth 1 point. These rounds don't count toward the "in sync" stats.
 7. **Likes:** at the reveal of word and sketch rounds, everyone can ♥ one favorite answer (tap again to take it back, or tap another to move it). You can't like your own. The most-liked answer gets **+1**; ties all get it. In sketch rounds you can like drawings in the anonymous gallery, before anyone knows who drew them.
 8. At the end you see the winner, the **most in-sync pair**, and a round-by-round recap.
 

@@ -1,9 +1,10 @@
 // Pure game rules. The host owns a `state` object and feeds actions through `reduce`.
-import { PROMPTS, SKETCHES, PICKS, RATHERS, shuffle } from './prompts.js';
+import { PROMPTS, SKETCHES, PICKS, RATHERS, VOTES, shuffle } from './prompts.js';
 
 // Round modes. "words" = type an answer, "sketch" = draw it (with a hidden label),
 // "pick" = choose one of four, "rather" = would-you-rather, scored by siding with the majority.
-export const MODES = ['words', 'sketch', 'pick', 'rather'];
+// "vote" = best answer: type something funny, then everyone votes anonymously; 1 point per vote.
+export const MODES = ['words', 'sketch', 'pick', 'rather', 'vote'];
 const MAX_ART = 12000; // base64 chars, ~4000 points
 
 export const COLORS = ['#7c9a92', '#c28f6b', '#8a8fbf', '#b5838d', '#6d9dc5', '#a3a86b', '#c9a227', '#9c7bb0', '#5f9e7a', '#c47a7a', '#6b8fa3', '#a68a64'];
@@ -15,7 +16,7 @@ export function newGame(code, hostId, hostName) {
     hostId,
     phase: 'lobby',
     players: [],
-    settings: { rounds: 8, timer: 0, custom: '', modes: { words: true, sketch: true, pick: true, rather: true } },
+    settings: { rounds: 8, timer: 0, custom: '', modes: { words: true, sketch: true, pick: true, rather: true, vote: true } },
     deck: [],
     decks: {},
     plan: [],
@@ -29,6 +30,8 @@ export function newGame(code, hostId, hostName) {
     history: [], // one entry per finished round, for the end-of-game recap
     prompts: {}, // pid -> custom prompts that player added in the lobby
     likes: {}, // voter pid -> liked pid, for the current round (one like each)
+    ballot: [], // best-answer rounds: shuffled author ids; clients only ever see the index
+    votes: {}, // voter pid -> author pid
     promptBy: null, // pid who wrote the current prompt, if custom
     historyArt: {}, // round -> { pid: drawing }
     type: 'crowd',
@@ -91,6 +94,9 @@ function rekey(s, from, to) {
   move(s.points);
   move(s.prompts);
   move(s.likes);
+  move(s.votes);
+  for (const [voter, target] of Object.entries(s.votes || {})) if (target === from) s.votes[voter] = to;
+  s.ballot = (s.ballot || []).map((m) => (m === from ? to : m));
   for (const [voter, target] of Object.entries(s.likes || {})) if (target === from) s.likes[voter] = to;
   if (s.promptBy === from) s.promptBy = to;
   move(s.stats);
@@ -184,10 +190,10 @@ function draw(s, mode) {
     else if (item.by === s.hostId && s.settings.custom) s.settings.custom = s.settings.custom.split('\n').filter((l) => l.trim() !== item.t).join('\n');
     return { prompt: item.t, options: null, by: item.by };
   }
-  const src = { sketch: SKETCHES, pick: PICKS, rather: RATHERS }[mode];
+  const src = { sketch: SKETCHES, pick: PICKS, rather: RATHERS, vote: VOTES }[mode];
   if (!s.decks[mode] || !s.decks[mode].length) s.decks[mode] = shuffle(src.map((_, i) => i));
   const item = src[s.decks[mode].pop()];
-  if (mode === 'sketch') return { prompt: item, options: null };
+  if (mode === 'sketch' || mode === 'vote') return { prompt: item, options: null };
   if (mode === 'pick') return { prompt: item.q, options: item.o.slice() };
   return { prompt: 'Would you rather…', options: item.slice() };
 }
@@ -203,12 +209,14 @@ function startRound(s) {
   s.gallery = [];
   s.unveiled = true;
   s.likes = {};
+  s.ballot = [];
+  s.votes = {};
   s.answers = {};
   s.groups = [];
   s.points = {};
   s.phase = 'answer';
   const active = connectedPlayers(s);
-  if (s.round % 3 === 0 && active.length >= 3) {
+  if (s.round % 3 === 0 && active.length >= 3 && s.mode !== 'vote') {
     s.type = 'spotlight';
     const min = Math.min(...active.map((p) => p.spot));
     const pool = active.filter((p) => p.spot === min);
@@ -243,6 +251,21 @@ function cleanPrompts(text) {
 }
 
 function reveal(s) {
+  if (s.mode === 'vote') {
+    // Every answer stands alone; next comes anonymous voting.
+    s.groups = Object.entries(s.answers)
+      .filter(([, raw]) => raw && raw.trim())
+      .map(([id, raw]) => ({ id: s.nextGroupId++, label: raw.trim(), members: [id] }));
+    s.ballot = shuffle(s.groups.map((g) => g.members[0]));
+    s.votes = {};
+    s.phase = 'vote';
+    s.deadline = 0;
+    s.unveiled = true;
+    s.gallery = [];
+    score(s);
+    maybeAutoTally(s);
+    return;
+  }
   const byKey = new Map();
   for (const [id, raw] of Object.entries(s.answers)) {
     const key = normalize(raw);
@@ -268,7 +291,12 @@ export function score(s) {
   const pts = {};
   for (const p of s.players) pts[p.id] = 0;
   const spotGroup = s.type === 'spotlight' && s.groups.find((g) => g.members.includes(s.spotlight));
-  if (spotGroup) {
+  if (s.mode === 'vote') {
+    for (const [id, n] of Object.entries(voteCounts(s))) if (id in pts) pts[id] = n;
+    s.points = pts;
+    s.groups.sort((a, b) => (pts[b.members[0]] || 0) - (pts[a.members[0]] || 0) || a.label.localeCompare(b.label));
+    return;
+  } else if (spotGroup) {
     for (const id of spotGroup.members) {
       if (id === s.spotlight) pts[id] = spotGroup.members.length - 1;
       else pts[id] = 2;
@@ -315,7 +343,7 @@ function bank(s) {
     if (!g && !p.connected) continue;
     const st = (s.stats[p.id] ||= { rounds: 0, answered: 0, matched: 0, lone: 0, spotTurns: 0, spotMatchers: 0, spotTries: 0, spotHits: 0 });
     st.rounds++;
-    if (!g) continue;
+    if (!g || s.mode === 'vote') continue; // best-answer rounds don't count toward the in-sync stats
     st.answered++;
     if (g.members.length > 1) st.matched++;
     else st.lone++;
@@ -353,6 +381,8 @@ function resetToLobby(s) {
   s.history = [];
   s.historyArt = {};
   s.likes = {};
+  s.ballot = [];
+  s.votes = {};
   s.sync = {};
   s.answers = {};
   s.groups = [];
@@ -406,6 +436,16 @@ export function reduce(s, from, a) {
       if (s.phase === 'lobby') s.players = s.players.filter((p) => p.id !== from);
       else me.connected = false;
       return maybeAutoReveal(s) || true;
+    case 'vote': {
+      if (s.phase !== 'vote' || !me) return false;
+      const target = (s.ballot || [])[Number(a.k)];
+      if (!target || target === from || !s.players.some((p) => p.id === target)) return false;
+      if (s.votes[from] === target) return false;
+      s.votes[from] = target;
+      score(s);
+      maybeAutoTally(s);
+      return true;
+    }
     case 'like': {
       if (s.phase !== 'reveal' || !me || !canLike(s)) return false;
       const target = String(a.id || '');
@@ -422,7 +462,7 @@ export function reduce(s, from, a) {
       return true;
     case 'answer': {
       if (s.phase !== 'answer' || !me) return false;
-      let text = String(a.text || '').trim().slice(0, 40);
+      let text = String(a.text || '').trim().slice(0, s.mode === 'vote' ? 90 : 40);
       if (s.options && text) {
         text = s.options.find((o) => o === String(a.text)) || '';
         if (!text) return false;
@@ -459,7 +499,11 @@ export function reduce(s, from, a) {
         for (const [voter, target] of Object.entries(s.likes)) if (target === a.id) delete s.likes[voter];
       }
       delete s.answers[a.id];
-      if (s.phase === 'reveal') {
+      if (s.votes) {
+        delete s.votes[a.id];
+        for (const [voter, target] of Object.entries(s.votes)) if (target === a.id) delete s.votes[voter];
+      }
+      if (s.phase === 'reveal' || s.phase === 'vote') {
         for (const g of s.groups) g.members = g.members.filter((m) => m !== a.id);
         s.groups = s.groups.filter((g) => g.members.length || s.options);
         s.gallery = s.gallery.filter((m) => m !== a.id);
@@ -497,6 +541,11 @@ export function reduce(s, from, a) {
       score(s);
       return true;
     }
+    case 'tally':
+      if (s.phase !== 'vote') return false;
+      s.phase = 'reveal';
+      score(s);
+      return true;
     case 'unveil':
       if (s.phase !== 'reveal' || s.unveiled) return false;
       s.unveiled = true;
@@ -523,7 +572,35 @@ export function reduce(s, from, a) {
   return false;
 }
 
+// Who can vote: connected players with at least one answer on the ballot that isn't theirs.
+function voters(s) {
+  const here = new Set(s.players.map((p) => p.id));
+  const authors = (s.ballot || []).filter((id) => here.has(id));
+  return connectedPlayers(s).filter((p) => authors.some((id) => id !== p.id));
+}
+
+export function voteCounts(s) {
+  const here = new Set(s.players.map((p) => p.id));
+  const out = {};
+  for (const [voter, target] of Object.entries(s.votes || {})) {
+    if (!here.has(voter) || !here.has(target) || voter === target) continue;
+    out[target] = (out[target] || 0) + 1;
+  }
+  return out;
+}
+
+function maybeAutoTally(s) {
+  if (s.phase !== 'vote') return false;
+  if (voters(s).every((p) => s.votes[p.id])) {
+    s.phase = 'reveal';
+    score(s);
+    return true;
+  }
+  return false;
+}
+
 function maybeAutoReveal(s) {
+  if (s.phase === 'vote') return maybeAutoTally(s);
   if (s.phase !== 'answer') return false;
   const active = connectedPlayers(s);
   if (active.length && active.every((p) => s.answers[p.id])) {
@@ -551,7 +628,7 @@ export function setConnected(s, id, on) {
 
 // Likes only make sense where answers differ from person to person.
 export function canLike(s) {
-  return s.mode === 'words' || s.mode === 'sketch' || !s.mode;
+  return s.mode === 'words' || s.mode === 'sketch' || !s.mode; // not 'vote': there the vote is the point
 }
 
 // Likes per answer (player id), counting only valid votes from players still in the room.
@@ -605,6 +682,16 @@ export function viewFor(s, pid) {
   if (s.phase === 'answer') {
     v.submitted = Object.keys(s.answers);
     v.mine = s.answers[pid] || '';
+  }
+  if (s.phase === 'vote') {
+    // Anonymous ballot: entries are identified by position only.
+    const here = new Set(s.players.map((p) => p.id));
+    v.ballot = s.ballot.map((id, k) => ({ k, text: s.answers[id] || '' })).filter((e) => here.has(s.ballot[e.k]));
+    v.myEntry = s.ballot.indexOf(pid);
+    const mv = s.votes[pid];
+    v.myVote = mv ? s.ballot.indexOf(mv) : -1;
+    v.voters = voters(s).map((p) => p.id);
+    v.voted = Object.keys(s.votes).filter((id) => here.has(id));
   }
   // Drawings travel separately (see artFor) so they aren't repeated in every player's view.
   if (s.phase === 'reveal' && !s.unveiled) {
