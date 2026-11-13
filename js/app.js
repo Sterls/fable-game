@@ -315,7 +315,8 @@ function homeScreen() {
       <li><b>Quick pick:</b> tap one of four options. Pick what you think most people will pick.</li>
       <li><b>Would you rather:</b> a spicy dilemma. Everyone on the majority side scores 2.</li>
     </ol>` : ''}
-  </section>`;
+  </section>
+  <p class="center small"><a class="footlink" href="privacy.html">Privacy policy</a></p>`;
 }
 
 function lobbyScreen(v) {

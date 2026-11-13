@@ -221,7 +221,7 @@ button:focus-visible, [data-group]:focus-visible { outline: 2px solid var(--acce
 .dotsz.l { width: 12px; height: 12px; }
 .gallery { list-style: none; padding: 0; margin: 12px 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
 .mem-art { flex-direction: column; align-items: flex-start; gap: 4px; }
-.mem-art > span { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mem > span { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 /* ---------- end-of-game recap ---------- */
 .recap { list-style: none; padding: 0; margin: 0; }
@@ -253,3 +253,4 @@ span.like.own { border: none; padding: 0 2px; background: none; color: #c0614f; 
 .mem-art > .like { align-self: flex-start; }
 .gallery li { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .gallery .like { min-width: 56px; }
+.footlink { color: var(--muted); }
